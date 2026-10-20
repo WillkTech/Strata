@@ -10,9 +10,11 @@ Design goals:
     - Prioritize inference state and throughput.
     - Status bar shows the model name (left) and engine version (right);
       the URL labels the request table.
-    - Top row pairs the inference block (state, counters, context gauge,
-      throughput charts) with the hardware charts; each chart sits above its
-      current value, and the columns are balanced in height.
+    - Single column: a state strip (only the current state is colored), live
+      counters, the reading-progress and context bars, then the hardware
+      charts; each chart sits above its current value.
+    - Slow-changing configuration sits greyed under the URL; the footnote
+      carries the timeline.
     - Preserve missing telemetry as unavailable.
     - Keep the dashboard usable in smaller terminals.
     - Keep API polling asynchronous and keyboard navigation simple.
@@ -33,11 +35,16 @@ from datetime import datetime
 from typing import Any
 
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import VerticalScroll
 from textual.widgets import DataTable, Footer, Header, Static
 
 SERIES_WINDOW = 60  # matches the server's 60-sample telemetry history
-SPARKLINE_WIDTH = 24  # display width inside half-width panels
+SPARKLINE_WIDTH = 40
+LABEL_PAD = 20  # label column shared by the bars, charts and counters
+
+# States shown in the strip; only the current one is colored.
+STRIP_STATES = ("IDLE", "READING", "GENERATING", "QUEUED", "COMPLETED",
+                "CANCELLED", "ERROR")
 BASE_URL = os.environ.get("STRATA_URL", "http://127.0.0.1:8000").rstrip("/")
 POLL_SECONDS = max(0.25, float(os.environ.get("STRATA_MONITOR_INTERVAL", "1.0")))
 HTTP_TIMEOUT = max(0.1, float(os.environ.get("STRATA_MONITOR_TIMEOUT", "2.0")))
@@ -335,6 +342,12 @@ def phase_token(state: str) -> tuple[str, str]:
     return mapping.get(st, (PALETTE.text_secondary, "?"))
 
 
+# Display labels for finished requests: `stop`, `end_turn` and `completed`
+# are the engine's words for "the reply ended by itself", which reads as DONE
+# in a history table.
+FINISH_LABELS = {"STOP": "DONE", "END_TURN": "DONE", "COMPLETED": "DONE"}
+
+
 def finish_color(finish: Any) -> str:
     f = str(finish or "").strip().upper()
     if f in {"COMPLETED", "STOP", "END_TURN"}:
@@ -449,36 +462,24 @@ class StrataMonitor(App):
         padding: 0 1;
     }
 
-    #top {
-        height: auto;
-        min-height: 18;
-        margin-bottom: 1;
-    }
-
     .panel {
         width: 1fr;
         height: auto;
-        min-height: 9;
+        min-height: 20;
+        margin-bottom: 1;
         padding: 1 2;
-        margin-right: 1;
         border: round $primary;
         background: $surface;
     }
 
-    #state {
+    #main {
         border-title-color: $success;
     }
 
-    #hardware {
-        margin-right: 0;
-        border-title-color: $warning;
-    }
-
     #requests-heading {
-        height: 2;
+        height: 3;
         padding: 0 1;
         color: $text;
-        text-style: bold;
     }
 
     #requests {
@@ -521,7 +522,7 @@ class StrataMonitor(App):
         # has no disk-write series, so the monitor keeps its own window.
         self.series: dict[str, deque] = {
             key: deque(maxlen=SERIES_WINDOW)
-            for key in ("tok_s", "prefill_tok_s_mean", "gpu_util", "gpu_mem_used",
+            for key in ("tok_s", "gpu_util", "gpu_mem_used",
                         "cpu", "ram_used", "disk_read_mb", "disk_write_mb")
         }
 
@@ -536,17 +537,11 @@ class StrataMonitor(App):
         yield Header()
 
         with VerticalScroll(id="content"):
-            with Horizontal(id="top"):
-                yield Static(
-                    "CONNECTING  /  Waiting for Strata telemetry…",
-                    id="state",
-                    classes="panel",
-                )
-                yield Static(
-                    "HARDWARE  /  Recent samples",
-                    id="hardware",
-                    classes="panel",
-                )
+            yield Static(
+                "CONNECTING  /  Waiting for Strata telemetry…",
+                id="main",
+                classes="panel",
+            )
 
             yield Static(BASE_URL, id="requests-heading")
             yield DataTable(id="requests")
@@ -580,14 +575,13 @@ class StrataMonitor(App):
         self.screen.styles.background = p.surface_bg
         self.screen.styles.color = p.text_primary
 
-        for selector in ("#state", "#hardware", "#requests"):
+        for selector in ("#main", "#requests"):
             widget = self.query_one(selector)
             widget.styles.background = p.panel_bg
             widget.styles.color = p.text_primary
             widget.styles.border = ("round", p.border_subtle)
 
-        self.query_one("#state", Static).styles.border_title_color = p.status_idle
-        self.query_one("#hardware", Static).styles.border_title_color = p.hw_gpu_elevated
+        self.query_one("#main", Static).styles.border_title_color = p.status_idle
         self.query_one("#requests", DataTable).styles.border_title_color = p.text_secondary
 
         heading = self.query_one("#requests-heading", Static)
@@ -597,6 +591,15 @@ class StrataMonitor(App):
         footnote = self.query_one("#footnote", Static)
         footnote.styles.background = p.surface_bg
         footnote.styles.color = p.text_muted
+
+    def config_line(self, engine: dict, static: dict) -> str:
+        """Slow-changing configuration, one greyed line under the URL."""
+        return (
+            f"HARDWARE {static.get('gpu_name') or MISSING}  ·  "
+            f"KV {engine.get('kv', MISSING)}  ·  "
+            f"Spec.MTP {engine.get('mtp_max', MISSING)}  ·  "
+            f"Expert cache {number(engine.get('expert_cache_mib'))} MiB"
+        )
 
     async def action_refresh_now(self) -> None:
         await self.refresh_data()
@@ -634,9 +637,12 @@ class StrataMonitor(App):
             details = "\n".join(self.last_errors) or (
                 f"Waiting for /metrics at {BASE_URL}"
             )
-            self.query_one("#state", Static).update(
+            self.query_one("#main", Static).update(
                 f"[bold {p.status_error}]API UNAVAILABLE[/]\n"
                 f"[{p.text_secondary}]{details}[/]"
+            )
+            self.query_one("#requests-heading", Static).update(
+                f"[bold]{BASE_URL}[/]\n[{p.text_muted}]{self.config_line({}, {})}[/]"
             )
             self.query_one("#footnote", Static).update(
                 f"[{p.text_muted}]No successful metrics snapshot received.[/]"
@@ -655,8 +661,18 @@ class StrataMonitor(App):
         self.sub_title = str(engine.get("version", engine.get("engine", MISSING)))
 
         state = get_state(m, s)
-        color, symbol = phase_token(state)
         active = state in {"READING", "GENERATING", "BUSY"}
+
+        # State strip: every state greyed out, only the current one colored.
+        strip_states = list(STRIP_STATES)
+        if state not in strip_states:
+            strip_states.append(state)
+        strip = "  ".join(
+            f"[bold {c}]{sym} {name}[/]" if name == state
+            else f"[{p.text_muted}]{sym} {name}[/]"
+            for name in strip_states
+            for c, sym in (phase_token(name),)
+        )
 
         queued = live.get("queued")
         if queued is None:
@@ -703,37 +719,39 @@ class StrataMonitor(App):
         age = max(0, time.time() - self.last_ok)
         fresh = age <= max(3 * POLL_SECONDS, 3)
         freshness_color = p.status_connected if fresh else p.status_stale
-        freshness = (
-            f"CURRENT · {age:.1f}s"
-            if fresh
-            else f"STALE · {age:.0f}s"
-        )
 
-        def chart(label: str, series_key: str, color: str, value: str, pad: int) -> str:
+        def chart(label: str, series_key: str, color: str, value: str) -> str:
             return (
-                f"{label:<{pad}}[{color}]{sparkline(self.series[series_key], SPARKLINE_WIDTH)}[/]\n"
-                f"{' ' * pad}{value}"
+                f"{label:<{LABEL_PAD}}[{color}]{sparkline(self.series[series_key], SPARKLINE_WIDTH)}[/]\n"
+                f"{' ' * LABEL_PAD}{value}"
             )
 
-        # Inference block (absorbs the old banner and the model block):
-        # state, freshness, live request counters, model configuration,
-        # context gauge, then the throughput charts at the bottom.
-        progress = ""
+        # Prefill speed: the bar shows prompt-reading progress (absorbing the
+        # old Prompt progress line); the value line carries the rate plus the
+        # actual progress numbers. A finished request read its whole prompt,
+        # so idle shows that completed bar instead of an empty one.
         prompt_read = live.get("prompt_read")
         prompt_total = live.get("prompt_total")
+        if not active:
+            if prompt_read is None:
+                prompt_read = last_req.get("prompt_tokens")
+            if prompt_total is None:
+                prompt_total = last_req.get("prompt_tokens")
+        progress_pct = pct_float(prompt_read, prompt_total)
 
-        if active and prompt_read is not None and prompt_total:
-            try:
-                progress_pct = (
-                    100 * float(prompt_read) / float(prompt_total)
-                )
-                progress = (
-                    f"\nPrompt progress     "
-                    f"[{p.phase_reading}]{integer(prompt_read)} / {integer(prompt_total)} "
-                    f"({progress_pct:.1f}%)[/]"
-                )
-            except (TypeError, ValueError, ZeroDivisionError):
-                pass
+        if progress_pct is None:
+            progress_line = (
+                f"Prefill speed     [{p.telemetry_missing}]{bar(None, 20)}[/]\n"
+                f"{' ' * LABEL_PAD}[{prefill_color}]{number(prefill)} tk/s[/]  ·  "
+                f"[{p.text_muted}]no reading progress[/]"
+            )
+        else:
+            progress_line = (
+                f"Prefill speed     [{p.phase_reading}]{bar(progress_pct, 20)}[/]\n"
+                f"{' ' * LABEL_PAD}[{prefill_color}]{number(prefill)} tk/s[/]  ·  "
+                f"[{p.phase_reading}]{integer(prompt_read)} / {integer(prompt_total)} "
+                f"({progress_pct:.1f}%)[/]"
+            )
 
         # Context gauge: prefers live counters and falls back to the last
         # request so it stays populated when idle.
@@ -753,37 +771,18 @@ class StrataMonitor(App):
         ctx_pct = pct_float(ctx_used, ctx_limit)
 
         if ctx_pct is None:
-            context_line = f"Context usage       [{p.telemetry_missing}]unavailable[/]"
+            context_line = f"Context usage     [{p.telemetry_missing}]unavailable[/]"
         else:
             ctx_color, ctx_badge, ctx_symbol = context_usage_token(
                 ctx_pct, self.thresholds
             )
             context_line = (
-                f"Context usage       [{ctx_color}]{bar(ctx_pct, 16)} "
+                f"Context usage     [{ctx_color}]{bar(ctx_pct, 20)} "
                 f"{ctx_pct:.1f}% {ctx_symbol} {ctx_badge}[/]\n"
-                f"                      [{p.text_primary}]{integer(ctx_used)} / "
+                f"{' ' * LABEL_PAD}[{p.text_primary}]{integer(ctx_used)} / "
                 f"{integer(ctx_limit)} tokens[/]"
             )
 
-        state_text = (
-            f"[bold {color}]{symbol} {state}[/]  [{freshness_color}]●[/] "
-            f"[{p.text_muted}]{freshness}[/]\n"
-            f"Queue depth         [{p.text_primary}]{integer(queued)}[/]\n"
-            f"Generated tokens    [{p.text_primary}]{integer(generated)}[/]\n"
-            f"Elapsed             [{p.text_primary}]{number(elapsed)} s[/]"
-            f"{progress}\n"
-            f"KV cache            [{p.text_secondary}]{engine.get('kv', MISSING)}[/]\n"
-            f"Speculative MTP     [{p.text_secondary}]{engine.get('mtp_max', MISSING)}[/]\n"
-            f"Expert cache        [{p.hw_storage}]{number(engine.get('expert_cache_mib'))} MiB[/]\n\n"
-            f"{context_line}\n"
-            + chart("Decode tk/s", "tok_s", speed_color,
-                    f"[{speed_color}]{number(speed)} tk/s[/]", 20) + "\n"
-            + chart("Prefill speed", "prefill_tok_s_mean", p.perf_prefill,
-                    f"[{prefill_color}]{number(prefill)} tk/s[/]", 20)
-        )
-        self.query_one("#state", Static).update(state_text)
-
-        # Hardware block: each chart sits above its current value.
         gpu_used = hw.get("gpu_mem_used")
         gpu_total = hw.get("gpu_mem_total")
         ram_used = hw.get("ram_used")
@@ -802,23 +801,37 @@ class StrataMonitor(App):
             else p.hw_cpu
         )
 
-        hardware_text = (
-            f"[bold]HARDWARE[/]  [{p.text_primary}]{static.get('gpu_name') or 'GPU'}[/]\n"
-            + chart("GPU util", "gpu_util", gpu_color, f"[{gpu_color}]{number(hw.get('gpu_util'), 0)}%[/]", 15) + "\n"
+        # Single merged column: state strip, counters, the two bars, then the
+        # hardware charts. Slow-changing config lives under the URL.
+        self.query_one("#requests-heading", Static).update(
+            f"[bold]{BASE_URL}[/]\n[{p.text_muted}]{self.config_line(engine, static)}[/]"
+        )
+
+        main_text = (
+            f"{strip}\n\n"
+            f"Q.Depth [{p.text_primary}]{integer(queued)}[/]  ·  "
+            f"tks [{p.text_primary}]{integer(generated)}[/]  ·  "
+            f"Elapsed [{p.text_primary}]{number(elapsed)} s[/]\n\n"
+            f"{progress_line}\n\n"
+            f"{context_line}\n\n"
+            + chart("Decode tk/s", "tok_s", speed_color,
+                    f"[{speed_color}]{number(speed)} tk/s[/]") + "\n"
+            + chart("GPU util", "gpu_util", gpu_color,
+                    f"[{gpu_color}]{number(hw.get('gpu_util'), 0)}%[/]") + "\n"
             + chart("GPU memory", "gpu_mem_used", p.hw_storage,
                     f"[{p.text_primary}]{mib(gpu_used)} / {mib(gpu_total)}[/]  "
-                    f"[{gpu_color}]({pct(gpu_used, gpu_total)})[/]", 15) + "\n"
+                    f"[{gpu_color}]({pct(gpu_used, gpu_total)})[/]") + "\n"
             + chart("CPU", "cpu", p.hw_cpu,
-                    f"[{cpu_color}]{number(cpu_val)}%[/]", 15) + "\n"
+                    f"[{cpu_color}]{number(cpu_val)}%[/]") + "\n"
             + chart("RAM", "ram_used", mem_color,
                     f"[{mem_color}]{mib(ram_used)} / {mib(ram_total)}[/]  "
-                    f"[{mem_color}]({pct(ram_used, ram_total)})[/]", 15) + "\n"
+                    f"[{mem_color}]({pct(ram_used, ram_total)})[/]") + "\n"
             + chart("Disk read", "disk_read_mb", p.hw_storage,
-                    f"[{p.hw_storage}]{number(hw.get('disk_read_mb'), 2)} MB[/]", 15) + "\n"
+                    f"[{p.hw_storage}]{number(hw.get('disk_read_mb'), 2)} MB[/]") + "\n"
             + chart("Disk write", "disk_write_mb", p.hw_storage,
-                    f"[{p.hw_storage}]{number(hw.get('disk_write_mb'), 2)} MB[/]", 15)
+                    f"[{p.hw_storage}]{number(hw.get('disk_write_mb'), 2)} MB[/]")
         )
-        self.query_one("#hardware", Static).update(hardware_text)
+        self.query_one("#main", Static).update(main_text)
 
         # Request history
         table = self.query_one("#requests", DataTable)
@@ -829,10 +842,11 @@ class StrataMonitor(App):
                 continue
 
             finish = str(req.get("finish") or MISSING)
+            finish_label = FINISH_LABELS.get(finish.strip().upper(), finish)
             table.add_row(
                 local_time(req.get("time")),
                 f"{number(req.get('duration_s'))} s",
-                f"[{finish_color(req.get('finish'))}]{finish}[/]",
+                f"[{finish_color(finish)}]{finish_label}[/]",
                 integer(req.get("prompt_tokens")),
                 integer(req.get("output_tokens")),
                 number(req.get("decode_tok_s")),
@@ -848,10 +862,12 @@ class StrataMonitor(App):
                 MISSING,
             )
 
-        # Footer: make degraded telemetry visible without hiding last good data.
+        # Footer: the timeline lives here; the strip above only carries state.
+        age_text = f"{age:.1f}s ago" if fresh else f"STALE · {age:.0f}s ago"
         conn_color = p.status_stale if self.last_errors else p.status_connected
         footer_note = (
             f"[{conn_color}]●[/] Last successful metrics: {last_success}"
+            f"  ·  [{freshness_color}]{age_text}[/]"
             f"  ·  Poll interval: {POLL_SECONDS:g}s"
         )
 
