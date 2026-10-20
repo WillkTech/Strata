@@ -26,10 +26,7 @@ import threading
 import time
 
 from serve import winjob
-try:
-    from strata_control import procs
-except ImportError:
-    procs = None
+from strata_control import procs
 
 _REAL_POPEN = subprocess.Popen                  # tests replace subprocess.Popen; isinstance needs the class
 LINUX = sys.platform.startswith("linux")
@@ -220,7 +217,7 @@ def _after_exit(child: subprocess.Popen, token: str | None) -> None:
     with _children_lock:
         _children.discard(child)
     release(child)
-    if token is not None and procs is not None:
+    if token is not None:
         procs.drop_record(child.pid, token)
 
 
@@ -265,7 +262,7 @@ def popen(args, role: str = "engine", **kw) -> subprocess.Popen:
         with _children_lock:
             _children.add(child)
     try:
-        token = procs.write_record(child.pid, role, profile=os.environ.get("STRATA_RUNTIME_PROFILE") or None) if procs is not None else None
+        token = procs.write_record(child.pid, role, profile=os.environ.get("STRATA_RUNTIME_PROFILE") or None)
         threading.Thread(target=_after_exit, args=(child, token), name="strata-lifeline-reaper", daemon=True).start()
     except Exception:  # noqa: BLE001 - a record is a safety net, never a reason to fail a start
         pass
