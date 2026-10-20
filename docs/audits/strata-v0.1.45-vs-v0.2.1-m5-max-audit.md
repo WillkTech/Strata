@@ -7,9 +7,12 @@
 
 ---
 
-## 1. Executive Summary
+## 1. Executive Summary & Post-Integration Results
 
 This report delivers a deep, source-code-level comparison between the original **Strata fork (v0.1.45 plus local modifications)** and the upstream **Strata v0.2.1 source release (`Strata-0.2.1/`)**, specifically evaluated for an **Apple Silicon Mac with an M5 Max chip and 128 GB unified memory**.
+
+### Post-Integration Status (`v0.2.1-m5`)
+The integration on dedicated branch `v0.2.1-m5` has been completed and verified. Critical local optimizations (GPU-executed Metal RoPE/YaRN scaling, Apple Mach VM memory sampling, and API-key authentication) were successfully preserved, while high-value upstream improvements (process lifeline supervision, out-of-tree Metal resource locator, and standalone vision tooling) were integrated.
 
 ### Key Findings Overview
 1. **Metal RoPE / YaRN (CRITICAL):**
