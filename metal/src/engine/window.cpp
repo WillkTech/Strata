@@ -17,7 +17,6 @@
 #include "ref_quant.h"
 #include "arena_budget.h"
 #include "stream.h"
-#include "engine/rope_table.h"
 #include "../../tests/coop_probe.h"
 
 #include "strata/core/layer.hpp"
@@ -489,16 +488,13 @@ bool Window::init(const strata::core::ModelGeometry& g, strata::core::SessionSta
     auto act = [&](int n) { Act a; a.n = n; a.b = A(4 * ((size_t) 4 * MAXT * n + (size_t) MAXT * n / 16)); return a; };
     XA_ = act(N); XF_ = act(N); XY_ = act(6144); XQ_ = act(6144); XH_ = act(NFF); XE_ = act(N);
     // RoPE: cos/sin [pos][32] for the first 64 dims, NEOX pairs (i, i + 32), in double as build_rope_table
-    // Reads strata::kernels::rope_scaling() set at startup (src/program/generate.cpp:3480)
-    strata::kernels::RopeScaling sc = strata::kernels::rope_scaling();
-    if (sc.freq_base <= 1.0) {
-        sc.freq_base = f_.meta_num.count("qwen4exp.rope.freq_base") ? f_.meta_num["qwen4exp.rope.freq_base"] : 1e7;
-    }
-    build_rope_table_interleaved(64, sc, MAXC + 16, cs_.as<float>());
-    if (sc.type != strata::kernels::RopeScalingType::None) {
-        std::fprintf(stderr, "strata metal: RoPE scaling %s active on Metal decode window (factor %.6g, mscale %.6f); M-RoPE/vision path shares table\n",
-                     sc.type == strata::kernels::RopeScalingType::YaRN ? "yarn" : "linear", sc.factor, sc.mscale());
-    }
+    const double base = f_.meta_num.count("qwen4exp.rope.freq_base") ? f_.meta_num["qwen4exp.rope.freq_base"] : 1e7;
+    for (int p = 0; p < MAXC + 16; ++p)
+        for (int i = 0; i < 32; ++i) {
+            const double th = (double) p * std::pow(base, -2.0 * i / 64.0);
+            cs_.as<float>()[(p * 32 + i) * 2] = (float) std::cos(th);
+            cs_.as<float>()[(p * 32 + i) * 2 + 1] = (float) std::sin(th);
+        }
     for (int t = 0; t < MAXT; ++t)
         for (int c = 0; c < 2051; ++c) qids_.as<int>()[t * 2051 + c] = c;
     for (int l = 0; l < 48; ++l) {

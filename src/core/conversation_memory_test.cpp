@@ -10,8 +10,6 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#elif defined(__APPLE__)
-#include <sys/sysctl.h>
 #endif
 
 using namespace strata::core;
@@ -63,12 +61,6 @@ int main() {
     check(GlobalMemoryStatusEx(&physical) != 0, "Windows physical-memory API is available");
     check(available.has_value() && *available <= physical.ullTotalPhys,
           "Windows provider returns a known, physically bounded sample");
-#elif defined(__APPLE__)
-    uint64_t phys = 0;
-    size_t len = sizeof phys;
-    check(sysctlbyname("hw.memsize", &phys, &len, nullptr, 0) == 0 && phys > 0, "macOS physical-memory API is available");
-    check(available.has_value() && *available <= phys,
-          "macOS provider returns a known, physically bounded sample");
 #endif
     std::printf("conversation_memory_test: %d checks passed\n", checks);
 }
