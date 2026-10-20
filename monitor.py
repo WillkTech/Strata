@@ -1,154 +1,414 @@
 #!/usr/bin/env python3
 """Live Textual dashboard for Strata's local monitoring API.
 
-Expected endpoints:
-  GET /metrics  -> Strata JSON metrics
-  GET /status   -> current request status
-  GET /slots    -> per-slot state
+Endpoints:
+    GET /metrics -> Strata JSON metrics
+    GET /status  -> current request status
+    GET /slots   -> per-slot state
 
-This dashboard only displays telemetry returned by Strata. Missing fields are shown
-as unavailable instead of being inferred.
+Design goals:
+    - Prioritize inference state and throughput.
+    - Status bar shows the model name (left) and engine version (right);
+      the URL labels the request table.
+    - Top row pairs the inference block (state, counters, context gauge,
+      throughput charts) with the hardware charts; each chart sits above its
+      current value, and the columns are balanced in height.
+    - Preserve missing telemetry as unavailable.
+    - Keep the dashboard usable in smaller terminals.
+    - Keep API polling asynchronous and keyboard navigation simple.
+    - Show every piece of information exactly once.
+    - Single built-in graphite palette with semantic threshold-based coloring.
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
 import os
 import time
-import urllib.error
 import urllib.request
+from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import DataTable, Footer, Header, Static
 
+SERIES_WINDOW = 60  # matches the server's 60-sample telemetry history
+SPARKLINE_WIDTH = 24  # display width inside half-width panels
 BASE_URL = os.environ.get("STRATA_URL", "http://127.0.0.1:8000").rstrip("/")
-POLL_SECONDS = float(os.environ.get("STRATA_MONITOR_INTERVAL", "1.0"))
-HTTP_TIMEOUT = float(os.environ.get("STRATA_MONITOR_TIMEOUT", "2.0"))
+POLL_SECONDS = max(0.25, float(os.environ.get("STRATA_MONITOR_INTERVAL", "1.0")))
+HTTP_TIMEOUT = max(0.1, float(os.environ.get("STRATA_MONITOR_TIMEOUT", "2.0")))
 
 
-def fetch_json(path: str) -> Any:
-    req = urllib.request.Request(
-        f"{BASE_URL}{path}",
-        headers={"Accept": "application/json", "User-Agent": "strata-tui-monitor/1.0"},
-    )
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
-        if response.status < 200 or response.status >= 300:
-            raise RuntimeError(f"HTTP {response.status}")
-        return json.loads(response.read().decode("utf-8"))
+# ---------------------------------------------------------------------------
+# Configurable thresholds & built-in semantic palette
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class TelemetryThresholds:
+    gpu_elevated: float = float(os.environ.get("STRATA_GPU_ELEVATED", "60.0"))
+    gpu_high: float = float(os.environ.get("STRATA_GPU_HIGH", "85.0"))
+    gpu_critical: float = float(os.environ.get("STRATA_GPU_CRITICAL", "95.0"))
+
+    ctx_elevated: float = float(os.environ.get("STRATA_CTX_ELEVATED", "50.0"))
+    ctx_near_cap: float = float(os.environ.get("STRATA_CTX_NEAR_CAP", "75.0"))
+    ctx_critical: float = float(os.environ.get("STRATA_CTX_CRITICAL", "90.0"))
+
+    cpu_high: float = float(os.environ.get("STRATA_CPU_HIGH", "80.0"))
+    mem_high: float = float(os.environ.get("STRATA_MEM_HIGH", "85.0"))
+    mem_critical: float = float(os.environ.get("STRATA_MEM_CRITICAL", "95.0"))
 
 
-async def fetch_all() -> tuple[dict, dict, list, list[str]]:
-    paths = ("/metrics", "/status", "/slots")
+@dataclass(frozen=True)
+class SemanticPalette:
+    surface_bg: str
+    panel_bg: str
+    border_subtle: str
+    border_focus: str
+    header_bg: str
+    text_primary: str
+    text_secondary: str
+    text_muted: str
+    selection_bg: str
 
-    async def one(path: str):
-        try:
-            result = await asyncio.to_thread(fetch_json, path)
-            return path, result, None
-        except Exception as exc:
-            return path, None, f"{path}: {type(exc).__name__}: {exc}"
+    status_connected: str
+    status_disconnected: str
+    status_starting: str
+    status_loading: str
+    status_idle: str
+    status_busy: str
+    status_error: str
+    status_stale: str
 
-    results = await asyncio.gather(*(one(path) for path in paths))
-    values: dict[str, Any] = {}
-    errors: list[str] = []
-    for path, result, error in results:
-        if error:
-            errors.append(error)
-        else:
-            values[path] = result
+    phase_queued: str
+    phase_reading: str
+    phase_generating: str
+    phase_completed: str
+    phase_cancelled: str
+    phase_failed: str
 
-    metrics = values.get("/metrics") or {}
-    status = values.get("/status") or {}
-    slots = values.get("/slots") or []
-    return metrics, status, slots if isinstance(slots, list) else [], errors
+    perf_decode: str
+    perf_decode_last: str
+    perf_prefill: str
+    perf_latency: str
+    perf_trend: str
+
+    hw_gpu_low: str
+    hw_gpu_elevated: str
+    hw_gpu_high: str
+    hw_gpu_critical: str
+    hw_cpu: str
+    hw_mem_normal: str
+    hw_mem_high: str
+    hw_mem_critical: str
+    hw_storage: str
+
+    ctx_normal: str
+    ctx_elevated: str
+    ctx_near_cap: str
+    ctx_critical: str
+
+    telemetry_missing: str
+
+
+PALETTE = SemanticPalette(
+    surface_bg="#121316",
+    panel_bg="#1A1C20",
+    border_subtle="#2A2E35",
+    border_focus="#7DD3FC",
+    header_bg="#16181D",
+    text_primary="#E4E4E7",
+    text_secondary="#A1A1AA",
+    text_muted="#71717A",
+    selection_bg="#27272A",
+    status_connected="#4ADE80",
+    status_disconnected="#F87171",
+    status_starting="#FACC15",
+    status_loading="#7DD3FC",
+    status_idle="#4ADE80",
+    status_busy="#FACC15",
+    status_error="#F87171",
+    status_stale="#FB923C",
+    phase_queued="#FACC15",
+    phase_reading="#7DD3FC",
+    phase_generating="#4ADE80",
+    phase_completed="#22C55E",
+    phase_cancelled="#71717A",
+    phase_failed="#EF4444",
+    perf_decode="#38BDF8",
+    perf_decode_last="#0284C7",
+    perf_prefill="#C084FC",
+    perf_latency="#A1A1AA",
+    perf_trend="#38BDF8",
+    hw_gpu_low="#A1A1AA",
+    hw_gpu_elevated="#FBBF24",
+    hw_gpu_high="#FB923C",
+    hw_gpu_critical="#F43F5E",
+    hw_cpu="#93C5FD",
+    hw_mem_normal="#A1A1AA",
+    hw_mem_high="#FBBF24",
+    hw_mem_critical="#F87171",
+    hw_storage="#D8B4FE",
+    ctx_normal="#4ADE80",
+    ctx_elevated="#7DD3FC",
+    ctx_near_cap="#FBBF24",
+    ctx_critical="#F87171",
+    telemetry_missing="#52525B",
+)
+
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+MISSING = "—"
 
 
 def number(value: Any, digits: int = 1) -> str:
     if value is None:
-        return "—"
+        return MISSING
     try:
         return f"{float(value):,.{digits}f}"
-    except (TypeError, ValueError):
-        return "—"
+    except (TypeError, ValueError, OverflowError):
+        return MISSING
 
 
 def integer(value: Any) -> str:
     if value is None:
-        return "—"
+        return MISSING
     try:
         return f"{int(value):,}"
-    except (TypeError, ValueError):
-        return "—"
+    except (TypeError, ValueError, OverflowError):
+        return MISSING
 
 
 def mib(value: Any) -> str:
+    """Format byte-valued telemetry as MiB, preserving the original scale."""
     if value is None:
-        return "—"
+        return MISSING
     try:
-        return f"{float(value) / (1024 ** 2):,.1f} GiB"
-    except (TypeError, ValueError):
-        return "—"
+        return f"{float(value) / (1024 ** 2):,.1f} MiB"
+    except (TypeError, ValueError, OverflowError):
+        return MISSING
+
+
+def pct_float(used: Any, total: Any) -> float | None:
+    try:
+        used_f, total_f = float(used), float(total)
+        if total_f <= 0:
+            return None
+        return min(100.0, 100.0 * used_f / total_f)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def pct(used: Any, total: Any) -> str:
     try:
         used_f, total_f = float(used), float(total)
         if total_f <= 0:
-            return "—"
+            return MISSING
         return f"{100 * used_f / total_f:.1f}%"
-    except (TypeError, ValueError):
-        return "—"
+    except (TypeError, ValueError, OverflowError):
+        return MISSING
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value) if value is not None else default
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 
 def bar(value: Any, width: int = 24) -> str:
     try:
         n = max(0.0, min(100.0, float(value)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "—" * width
+
     filled = round(width * n / 100)
     return "█" * filled + "░" * (width - filled)
 
 
-def sparkline(values: Any, width: int = 48) -> str:
-    if not isinstance(values, list):
-        return "—"
-    nums = []
+def sparkline(values: Any, width: int = 40) -> str:
+    if not isinstance(values, (list, deque)):
+        return MISSING
+
+    nums: list[float] = []
     for value in values:
         try:
             if value is not None:
                 nums.append(float(value))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
+
     if not nums:
-        return "—"
+        return MISSING
+
     nums = nums[-width:]
-    lo, hi = min(nums), max(nums)
+    low, high = min(nums), max(nums)
     glyphs = "▁▂▃▄▅▆▇█"
-    if hi == lo:
+
+    if high == low:
         return glyphs[0] * len(nums)
-    return "".join(glyphs[round((n - lo) / (hi - lo) * (len(glyphs) - 1))] for n in nums)
+
+    scale = len(glyphs) - 1
+    return "".join(
+        glyphs[round((n - low) / (high - low) * scale)]
+        for n in nums
+    )
 
 
 def local_time(timestamp: Any) -> str:
     try:
         return datetime.fromtimestamp(float(timestamp)).strftime("%H:%M:%S")
-    except (TypeError, ValueError, OSError):
-        return "—"
+    except (TypeError, ValueError, OverflowError, OSError):
+        return MISSING
 
 
-def get_state(metrics: dict, status: dict, errors: list[str]) -> tuple[str, str]:
+# ---------------------------------------------------------------------------
+# Semantic color tokens
+# ---------------------------------------------------------------------------
+def gpu_load_token(value: Any, thresholds: TelemetryThresholds) -> tuple[str, str, str]:
+    try:
+        n = float(value)
+        if n < 0 or n != n:
+            raise ValueError
+    except (TypeError, ValueError):
+        return PALETTE.telemetry_missing, "UNAVAIL", "○"
+
+    if n >= thresholds.gpu_critical:
+        return PALETTE.hw_gpu_critical, "MAX/CRIT", "▲"
+    if n >= thresholds.gpu_high:
+        return PALETTE.hw_gpu_high, "HIGH", "▴"
+    if n >= thresholds.gpu_elevated:
+        return PALETTE.hw_gpu_elevated, "ACTIVE", "◆"
+    return PALETTE.hw_gpu_low, "NOMINAL", "◇"
+
+
+def context_usage_token(pct_val: Any, thresholds: TelemetryThresholds) -> tuple[str, str, str]:
+    try:
+        n = float(pct_val)
+        if n < 0 or n != n:
+            raise ValueError
+    except (TypeError, ValueError):
+        return PALETTE.telemetry_missing, "IDLE", "○"
+
+    if n >= thresholds.ctx_critical:
+        return PALETTE.ctx_critical, "CRIT", "!"
+    if n >= thresholds.ctx_near_cap:
+        return PALETTE.ctx_near_cap, "NEAR", "▲"
+    if n >= thresholds.ctx_elevated:
+        return PALETTE.ctx_elevated, "ELEV", "◆"
+    return PALETTE.ctx_normal, "NORM", "●"
+
+
+def memory_usage_token(pct_val: Any, thresholds: TelemetryThresholds) -> str:
+    try:
+        n = float(pct_val)
+    except (TypeError, ValueError):
+        return PALETTE.telemetry_missing
+    if n >= thresholds.mem_critical:
+        return PALETTE.hw_mem_critical
+    if n >= thresholds.mem_high:
+        return PALETTE.hw_mem_high
+    return PALETTE.hw_mem_normal
+
+
+def phase_token(state: str) -> tuple[str, str]:
+    st = state.upper()
+    mapping = {
+        "IDLE": (PALETTE.status_idle, "●"),
+        "GENERATING": (PALETTE.phase_generating, "▶"),
+        "READING": (PALETTE.phase_reading, "◈"),
+        "QUEUED": (PALETTE.phase_queued, "◎"),
+        "LOADING": (PALETTE.status_loading, "◌"),
+        "STARTING": (PALETTE.status_starting, "◌"),
+        "BUSY": (PALETTE.status_busy, "◈"),
+        "COMPLETED": (PALETTE.phase_completed, "✓"),
+        "CANCELLED": (PALETTE.phase_cancelled, "✕"),
+        "STALE": (PALETTE.status_stale, "⚠"),
+        "DISCONNECTED": (PALETTE.status_disconnected, "✕"),
+        "API ERROR": (PALETTE.status_error, "!"),
+        "ERROR": (PALETTE.phase_failed, "!"),
+    }
+    return mapping.get(st, (PALETTE.text_secondary, "?"))
+
+
+def finish_color(finish: Any) -> str:
+    f = str(finish or "").strip().upper()
+    if f in {"COMPLETED", "STOP", "END_TURN"}:
+        return PALETTE.phase_completed
+    if f in {"CANCELLED", "ABORTED"}:
+        return PALETTE.phase_cancelled
+    if f in {"FAILED", "ERROR"}:
+        return PALETTE.phase_failed
+    return PALETTE.text_secondary
+
+
+# ---------------------------------------------------------------------------
+# API
+# ---------------------------------------------------------------------------
+def fetch_json(path: str) -> Any:
+    req = urllib.request.Request(
+        f"{BASE_URL}{path}",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "strata-tui-monitor/2.0",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
+        if not 200 <= response.status < 300:
+            raise RuntimeError(f"HTTP {response.status}")
+        return json.loads(response.read().decode("utf-8"))
+
+
+async def fetch_all() -> tuple[dict, dict, list, list[str]]:
+    async def one(path: str):
+        try:
+            result = await asyncio.to_thread(fetch_json, path)
+            return path, result, None
+        except Exception as exc:
+            return path, None, (
+                f"{path}: {type(exc).__name__}: {exc}"
+            )
+
+    results = await asyncio.gather(
+        *(one(path) for path in ("/metrics", "/status", "/slots"))
+    )
+
+    values: dict[str, Any] = {}
+    errors: list[str] = []
+
+    for path, result, error in results:
+        if error:
+            errors.append(error)
+        else:
+            values[path] = result
+
+    metrics = values.get("/metrics")
+    status = values.get("/status")
+    slots = values.get("/slots")
+
+    return (
+        metrics if isinstance(metrics, dict) else {},
+        status if isinstance(status, dict) else {},
+        slots if isinstance(slots, list) else [],
+        errors,
+    )
+
+
+def get_state(metrics: dict, status: dict) -> str:
     if not metrics:
-        return "API ERROR", "Cannot read /metrics"
+        return "API ERROR"
+
     live = metrics.get("live") or {}
     state = str(live.get("state") or "unknown").strip().upper()
-    queued = int(live.get("queued") or status.get("queued") or 0)
+    queued = safe_int(live.get("queued", status.get("queued", 0)))
 
-    # Trust explicit live state first. /status.phase can describe the last request
-    # even when busy=false, so only use it to refine state while busy is true.
     busy = status.get("busy")
     phase = str(status.get("phase") or live.get("phase") or "").lower()
+
     if state in {"READING", "PREFILL", "PROCESSING"}:
         state = "READING"
     elif state in {"GENERATING", "DECODING"}:
@@ -168,99 +428,103 @@ def get_state(metrics: dict, status: dict, errors: list[str]) -> tuple[str, str]
     elif state in {"ERROR", "FAILED"}:
         state = "ERROR"
 
-    sub = []
-    if queued:
-        sub.append(f"{queued} queued")
-    if errors:
-        sub.append("partial telemetry unavailable")
-    return state, " · ".join(sub) if sub else "Ctrl+C / q to return"
+    return state
 
 
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
 class StrataMonitor(App):
-    TITLE = "Strata Live Monitor"
-    SUB_TITLE = BASE_URL
+    TITLE = "MODEL"
+    SUB_TITLE = ""  # engine version, once the first poll lands
+
     CSS = """
     Screen {
         layout: vertical;
         background: $surface;
     }
-    Header {
-        background: $primary;
-        color: $text;
+
+    #content {
+        height: 1fr;
+        padding: 0 1;
     }
-    #banner {
-        height: 4;
-        padding: 0 2;
-        margin: 1 1 0 1;
-        border: round $success;
-        background: $panel;
-        content-align: left middle;
-    }
+
     #top {
-        height: 13;
-        margin: 1 1 0 1;
+        height: auto;
+        min-height: 18;
+        margin-bottom: 1;
     }
+
     .panel {
-        border: round $panel-lighten-2;
-        background: $panel;
-        padding: 1 2;
         width: 1fr;
-        height: 1fr;
+        height: auto;
+        min-height: 9;
+        padding: 1 2;
+        margin-right: 1;
+        border: round $primary;
+        background: $surface;
     }
-    #state { border-title-color: $success; }
-    #model { border-title-color: $accent; }
+
+    #state {
+        border-title-color: $success;
+    }
+
     #hardware {
-        height: 8;
-        margin: 1 1 0 1;
-        border: round $panel-lighten-2;
-        background: $panel;
-        padding: 1 2;
+        margin-right: 0;
+        border-title-color: $warning;
     }
-    #history {
-        height: 7;
-        margin: 1 1 0 1;
-        border: round $panel-lighten-2;
-        background: $panel;
-        padding: 1 2;
-    }
-    #requests-title {
-        height: 1;
-        margin: 1 2 0 2;
-        color: $text-muted;
-        text-style: bold;
-    }
-    #requests {
-        height: 1fr;
-        min-height: 7;
-        margin: 0 1;
-        background: $panel;
-    }
-    DataTable > .datatable--header {
-        background: $primary;
+
+    #requests-heading {
+        height: 2;
+        padding: 0 1;
         color: $text;
         text-style: bold;
     }
-    DataTable > .datatable--cursor {
-        background: $accent 25%;
+
+    #requests {
+        height: 12;
+        min-height: 8;
+        margin-bottom: 1;
+        border: round $primary;
     }
+
+    DataTable {
+        height: 1fr;
+    }
+
     #footnote {
-        height: 1;
-        padding: 0 2;
+        height: auto;
+        min-height: 2;
+        padding: 0 1;
         color: $text-muted;
     }
+
     Footer {
         background: $panel;
     }
     """
 
     BINDINGS = [
-        ("q", "quit", "Return"),
-        ("escape", "quit", "Return"),
+        ("q", "quit", "Quit"),
+        ("escape", "quit", "Quit"),
         ("r", "refresh_now", "Refresh"),
     ]
 
-    def __init__(self):
+    def __init__(
+        self,
+        thresholds: TelemetryThresholds | None = None,
+    ) -> None:
         super().__init__()
+        self.thresholds = thresholds or TelemetryThresholds()
+
+        # Rolling per-poll samples for the hardware charts; the API's history
+        # has no disk-write series, so the monitor keeps its own window.
+        self.series: dict[str, deque] = {
+            key: deque(maxlen=SERIES_WINDOW)
+            for key in ("tok_s", "prefill_tok_s_mean", "gpu_util", "gpu_mem_used",
+                        "cpu", "ram_used", "disk_read_mb", "disk_write_mb")
+        }
+
         self.last_ok = 0.0
         self.last_metrics: dict = {}
         self.last_status: dict = {}
@@ -270,24 +534,69 @@ class StrataMonitor(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static("  STRATA  /  LIVE TELEMETRY     Connecting…", id="banner")
-        with Horizontal(id="top"):
-            yield Static("REQUEST  •  LIVE", id="state", classes="panel")
-            yield Static("MODEL  •  CONTEXT", id="model", classes="panel")
-        yield Static("HARDWARE  •  APPLE SILICON", id="hardware", classes="panel")
-        yield Static("THROUGHPUT  •  RECENT HISTORY", id="history", classes="panel")
-        yield Static("RECENT REQUESTS", id="requests-title")
-        yield DataTable(id="requests")
-        yield Static("r refresh · q / Esc return to switcher", id="footnote")
+
+        with VerticalScroll(id="content"):
+            with Horizontal(id="top"):
+                yield Static(
+                    "CONNECTING  /  Waiting for Strata telemetry…",
+                    id="state",
+                    classes="panel",
+                )
+                yield Static(
+                    "HARDWARE  /  Recent samples",
+                    id="hardware",
+                    classes="panel",
+                )
+
+            yield Static(BASE_URL, id="requests-heading")
+            yield DataTable(id="requests")
+            yield Static("Initializing…", id="footnote")
+
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#history", Static).border_title = "THROUGHPUT  •  RECENT HISTORY"
         table = self.query_one("#requests", DataTable)
-        table.add_columns("Time", "Duration", "Finish", "Prompt", "Output", "Decode tk/s")
+        table.add_columns(
+            "Time",
+            "Duration",
+            "Finish",
+            "Prompt",
+            "Output",
+            "Decode tk/s",
+        )
         table.cursor_type = "row"
+        table.zebra_stripes = True
+
+        self.apply_palette_styles()
         self.set_interval(POLL_SECONDS, self.refresh_data)
-        self.run_worker(self.refresh_data(), group="poll", exclusive=True)
+        self.run_worker(
+            self.refresh_data(),
+            group="poll",
+            exclusive=True,
+        )
+
+    def apply_palette_styles(self) -> None:
+        p = PALETTE
+        self.screen.styles.background = p.surface_bg
+        self.screen.styles.color = p.text_primary
+
+        for selector in ("#state", "#hardware", "#requests"):
+            widget = self.query_one(selector)
+            widget.styles.background = p.panel_bg
+            widget.styles.color = p.text_primary
+            widget.styles.border = ("round", p.border_subtle)
+
+        self.query_one("#state", Static).styles.border_title_color = p.status_idle
+        self.query_one("#hardware", Static).styles.border_title_color = p.hw_gpu_elevated
+        self.query_one("#requests", DataTable).styles.border_title_color = p.text_secondary
+
+        heading = self.query_one("#requests-heading", Static)
+        heading.styles.background = p.surface_bg
+        heading.styles.color = p.text_primary
+
+        footnote = self.query_one("#footnote", Static)
+        footnote.styles.background = p.surface_bg
+        footnote.styles.color = p.text_muted
 
     async def action_refresh_now(self) -> None:
         await self.refresh_data()
@@ -295,26 +604,42 @@ class StrataMonitor(App):
     async def refresh_data(self) -> None:
         if self.polling:
             return
+
         self.polling = True
         try:
             metrics, status, slots, errors = await fetch_all()
+
             if metrics:
                 self.last_ok = time.time()
                 self.last_metrics = metrics
                 self.last_status = status
                 self.last_slots = slots
+                hw = metrics.get("hardware") or {}
+                live = metrics.get("live") or {}
+                for key, samples in self.series.items():
+                    value = hw.get(key)
+                    samples.append(value if value is not None else live.get(key))
+
             self.last_errors = errors
             self.render_dashboard()
         finally:
             self.polling = False
 
     def render_dashboard(self) -> None:
+        p = PALETTE
         m = self.last_metrics
         s = self.last_status
+
         if not m:
-            details = "\n".join(self.last_errors) or "Waiting for /metrics…"
-            self.query_one("#banner", Static).update(
-                f"[bold red]!  STRATA  /  API UNAVAILABLE[/]  [dim]{details}[/]"
+            details = "\n".join(self.last_errors) or (
+                f"Waiting for /metrics at {BASE_URL}"
+            )
+            self.query_one("#state", Static).update(
+                f"[bold {p.status_error}]API UNAVAILABLE[/]\n"
+                f"[{p.text_secondary}]{details}[/]"
+            )
+            self.query_one("#footnote", Static).update(
+                f"[{p.text_muted}]No successful metrics snapshot received.[/]"
             )
             return
 
@@ -322,120 +647,220 @@ class StrataMonitor(App):
         engine = m.get("engine") or {}
         hw = m.get("hardware") or {}
         static = m.get("hardware_static") or {}
-        totals = m.get("totals") or {}
-        state, note = get_state(m, s, self.last_errors)
-        state_color = {
-            "IDLE": "green", "GENERATING": "bright_green", "READING": "yellow",
-            "QUEUED": "yellow", "ERROR": "red", "API ERROR": "red",
-            "BUSY": "yellow", "UNKNOWN": "yellow",
-        }.get(state, "cyan")
+        requests = m.get("requests") or []
 
+        # Status bar: model name on the left, engine version on the right.
+        # Reactives deduplicate, so per-poll assignment is cheap.
+        self.title = f"MODEL  {engine.get('model') or MISSING}"
+        self.sub_title = str(engine.get("version", engine.get("engine", MISSING)))
+
+        state = get_state(m, s)
+        color, symbol = phase_token(state)
         active = state in {"READING", "GENERATING", "BUSY"}
-        queued = live.get("queued", s.get("queued", 0)) or 0
-        rate = live.get("tok_s") if active else None
-        if rate is None and active:
-            rate = hw.get("tok_s")
-        last_req = (m.get("requests") or [{}])[0]
-        speed_label = "Live decode" if active and rate is not None else "Last decode"
-        speed = rate if rate is not None else last_req.get("decode_tok_s")
-        elapsed = live.get("elapsed_s")
-        generated = live.get("generated") if active else last_req.get("output_tokens")
-        prefill = live.get("prefill_tok_s_mean") if active else (
-            (last_req.get("prompt_tokens", 0) / (last_req.get("prompt_ms", 0) / 1000))
-            if last_req.get("prompt_ms") else None
+
+        queued = live.get("queued")
+        if queued is None:
+            queued = s.get("queued")
+
+        last_req = requests[0] if requests and isinstance(requests[0], dict) else {}
+
+        speed = live.get("tok_s") if active else None
+        if speed is None and active:
+            speed = hw.get("tok_s")
+        if speed is None:
+            speed = last_req.get("decode_tok_s")
+        if speed is None:
+            speed_color = p.telemetry_missing
+        elif active:
+            speed_color = p.perf_decode
+        else:
+            speed_color = p.perf_decode_last
+
+        elapsed = live.get("elapsed_s") if active else None
+        generated = (
+            live.get("generated")
+            if active
+            else last_req.get("output_tokens")
         )
 
-        state_symbol = {
-            "IDLE": "●", "GENERATING": "▶", "READING": "◌", "ERROR": "!",
-            "API ERROR": "!", "BUSY": "◌", "UNKNOWN": "?"
-        }.get(state, "●")
-        self.query_one("#banner", Static).update(
-            f"[bold {state_color}]{state_symbol}  STRATA  /  {state}[/]  "
-            f"[dim]{note}[/]\n"
-            f"[bold]{engine.get('model', 'Model unavailable')}[/]  "
-            f"[dim]•  Updated {datetime.now().strftime('%H:%M:%S')}  •  Refresh {POLL_SECONDS:g}s[/]"
-        )
-
-        progress = ""
-        pr, pt = live.get("prompt_read"), live.get("prompt_total")
-        if active and pr is not None and pt:
-            progress = f"\nPrompt read: {integer(pr)} / {integer(pt)} ({100 * float(pr) / float(pt):.1f}%)"
-        ctx_line = ""
-        if active:
-            prompt_count = live.get("prompt_tokens")
-            if prompt_count is None:
-                prompt_count = live.get("prompt_total")
-            gen_count = live.get("generated") or 0
+        prefill = live.get("prefill_tok_s_mean") if active else None
+        if prefill is None and not active:
+            prompt_ms = last_req.get("prompt_ms")
+            prompt_tokens = last_req.get("prompt_tokens")
             try:
-                used = int(prompt_count or 0) + int(gen_count)
-                limit = int(engine.get("max_context") or engine.get("context") or 0)
-                if limit:
-                    cp = min(100, 100 * used / limit)
-                    ctx_line = f"\nActive context: {used:,} / {limit:,} ({cp:.1f}%)\n{bar(cp)}"
-            except (ValueError, TypeError):
+                if prompt_ms and prompt_tokens is not None:
+                    prefill = float(prompt_tokens) / (
+                        float(prompt_ms) / 1000
+                    )
+            except (TypeError, ValueError, ZeroDivisionError):
+                prefill = None
+        prefill_color = p.perf_prefill if prefill is not None else p.telemetry_missing
+
+        last_success = datetime.fromtimestamp(
+            self.last_ok
+        ).strftime("%H:%M:%S")
+
+        age = max(0, time.time() - self.last_ok)
+        fresh = age <= max(3 * POLL_SECONDS, 3)
+        freshness_color = p.status_connected if fresh else p.status_stale
+        freshness = (
+            f"CURRENT · {age:.1f}s"
+            if fresh
+            else f"STALE · {age:.0f}s"
+        )
+
+        def chart(label: str, series_key: str, color: str, value: str, pad: int) -> str:
+            return (
+                f"{label:<{pad}}[{color}]{sparkline(self.series[series_key], SPARKLINE_WIDTH)}[/]\n"
+                f"{' ' * pad}{value}"
+            )
+
+        # Inference block (absorbs the old banner and the model block):
+        # state, freshness, live request counters, model configuration,
+        # context gauge, then the throughput charts at the bottom.
+        progress = ""
+        prompt_read = live.get("prompt_read")
+        prompt_total = live.get("prompt_total")
+
+        if active and prompt_read is not None and prompt_total:
+            try:
+                progress_pct = (
+                    100 * float(prompt_read) / float(prompt_total)
+                )
+                progress = (
+                    f"\nPrompt progress     "
+                    f"[{p.phase_reading}]{integer(prompt_read)} / {integer(prompt_total)} "
+                    f"({progress_pct:.1f}%)[/]"
+                )
+            except (TypeError, ValueError, ZeroDivisionError):
                 pass
 
-        self.query_one("#state", Static).update(
-            f"[bold {state_color}]{state_symbol}  {state}[/]   "
-            f"[bold]QUEUE[/] {integer(queued)}\n"
-            f"\n[bold cyan]{number(speed)}[/] [dim]tk/s · {speed_label.lower()}[/]\n"
-            f"Output  {integer(generated)} tokens   ·   Elapsed  {number(elapsed, 1)} s\n"
-            f"Prefill  {number(prefill)} tk/s{progress}"
-        )
-        self.query_one("#state", Static).border_title = "REQUEST  •  LIVE"
+        # Context gauge: prefers live counters and falls back to the last
+        # request so it stays populated when idle.
+        ctx_prompt = live.get("prompt_tokens")
+        if ctx_prompt is None:
+            ctx_prompt = live.get("prompt_total")
+        ctx_generated = live.get("generated")
+        if ctx_prompt is None:
+            ctx_prompt = last_req.get("prompt_tokens")
+        if ctx_generated is None:
+            ctx_generated = last_req.get("output_tokens")
 
-        ctx = integer(engine.get("max_context") or engine.get("context"))
-        model_text = (
-            f"[bold]Model[/]  {engine.get('model', '—')}\n"
-            f"Engine  {engine.get('version', engine.get('engine', '—'))}\n"
-            f"Context limit  {ctx} tokens\n"
-            f"KV cache  {engine.get('kv', '—')}  ·  Speculative MTP {engine.get('mtp_max', '—')}\n"
-            f"Expert cache  {engine.get('expert_cache_mib', '—')} MiB\n"
-            f"{ctx_line or 'Context usage: shown during active requests only'}"
-        )
-        self.query_one("#model", Static).update(model_text)
-        self.query_one("#model", Static).border_title = "MODEL  •  CONTEXT"
+        ctx_limit = engine.get("max_context", engine.get("context"))
+        ctx_used = None
+        if ctx_prompt is not None:
+            ctx_used = safe_int(ctx_prompt) + safe_int(ctx_generated)
+        ctx_pct = pct_float(ctx_used, ctx_limit)
 
-        gpu_used, gpu_total = hw.get("gpu_mem_used"), hw.get("gpu_mem_total")
-        ram_used, ram_total = hw.get("ram_used"), hw.get("ram_total")
+        if ctx_pct is None:
+            context_line = f"Context usage       [{p.telemetry_missing}]unavailable[/]"
+        else:
+            ctx_color, ctx_badge, ctx_symbol = context_usage_token(
+                ctx_pct, self.thresholds
+            )
+            context_line = (
+                f"Context usage       [{ctx_color}]{bar(ctx_pct, 16)} "
+                f"{ctx_pct:.1f}% {ctx_symbol} {ctx_badge}[/]\n"
+                f"                      [{p.text_primary}]{integer(ctx_used)} / "
+                f"{integer(ctx_limit)} tokens[/]"
+            )
+
+        state_text = (
+            f"[bold {color}]{symbol} {state}[/]  [{freshness_color}]●[/] "
+            f"[{p.text_muted}]{freshness}[/]\n"
+            f"Queue depth         [{p.text_primary}]{integer(queued)}[/]\n"
+            f"Generated tokens    [{p.text_primary}]{integer(generated)}[/]\n"
+            f"Elapsed             [{p.text_primary}]{number(elapsed)} s[/]"
+            f"{progress}\n"
+            f"KV cache            [{p.text_secondary}]{engine.get('kv', MISSING)}[/]\n"
+            f"Speculative MTP     [{p.text_secondary}]{engine.get('mtp_max', MISSING)}[/]\n"
+            f"Expert cache        [{p.hw_storage}]{number(engine.get('expert_cache_mib'))} MiB[/]\n\n"
+            f"{context_line}\n"
+            + chart("Decode tk/s", "tok_s", speed_color,
+                    f"[{speed_color}]{number(speed)} tk/s[/]", 20) + "\n"
+            + chart("Prefill speed", "prefill_tok_s_mean", p.perf_prefill,
+                    f"[{prefill_color}]{number(prefill)} tk/s[/]", 20)
+        )
+        self.query_one("#state", Static).update(state_text)
+
+        # Hardware block: each chart sits above its current value.
+        gpu_used = hw.get("gpu_mem_used")
+        gpu_total = hw.get("gpu_mem_total")
+        ram_used = hw.get("ram_used")
+        ram_total = hw.get("ram_total")
+
+        gpu_color = gpu_load_token(hw.get("gpu_util"), self.thresholds)[0]
+        mem_color = memory_usage_token(
+            pct_float(ram_used, ram_total), self.thresholds
+        )
+        cpu_val = hw.get("cpu")
+        cpu_color = (
+            p.hw_gpu_high
+            if isinstance(cpu_val, (int, float))
+            and cpu_val == cpu_val
+            and cpu_val >= self.thresholds.cpu_high
+            else p.hw_cpu
+        )
+
         hardware_text = (
-            f"[bold]{static.get('gpu_name', 'GPU')}[/]  util {number(hw.get('gpu_util'), 0)}%  ·  "
-            f"memory {mib(gpu_used)} / {mib(gpu_total)} ({pct(gpu_used, gpu_total)})\n"
-            f"CPU {number(hw.get('cpu'), 1)}%  ·  RAM {mib(ram_used)} / {mib(ram_total)} ({pct(ram_used, ram_total)})\n"
-            f"Disk read {number(hw.get('disk_read_mb'), 2)} MB  ·  write {number(hw.get('disk_write_mb'), 2)} MB\n"
-            f"GPU temp/power: not reported by this API"
+            f"[bold]HARDWARE[/]  [{p.text_primary}]{static.get('gpu_name') or 'GPU'}[/]\n"
+            + chart("GPU util", "gpu_util", gpu_color, f"[{gpu_color}]{number(hw.get('gpu_util'), 0)}%[/]", 15) + "\n"
+            + chart("GPU memory", "gpu_mem_used", p.hw_storage,
+                    f"[{p.text_primary}]{mib(gpu_used)} / {mib(gpu_total)}[/]  "
+                    f"[{gpu_color}]({pct(gpu_used, gpu_total)})[/]", 15) + "\n"
+            + chart("CPU", "cpu", p.hw_cpu,
+                    f"[{cpu_color}]{number(cpu_val)}%[/]", 15) + "\n"
+            + chart("RAM", "ram_used", mem_color,
+                    f"[{mem_color}]{mib(ram_used)} / {mib(ram_total)}[/]  "
+                    f"[{mem_color}]({pct(ram_used, ram_total)})[/]", 15) + "\n"
+            + chart("Disk read", "disk_read_mb", p.hw_storage,
+                    f"[{p.hw_storage}]{number(hw.get('disk_read_mb'), 2)} MB[/]", 15) + "\n"
+            + chart("Disk write", "disk_write_mb", p.hw_storage,
+                    f"[{p.hw_storage}]{number(hw.get('disk_write_mb'), 2)} MB[/]", 15)
         )
         self.query_one("#hardware", Static).update(hardware_text)
-        self.query_one("#hardware", Static).border_title = "HARDWARE  •  APPLE SILICON"
 
-        history = m.get("history") or {}
-        self.query_one("#history", Static).update(
-            f"[bold]Recent samples  [dim](latest →)[/][/]\n"
-            f"Decode tk/s  {sparkline(history.get('tok_s'))}  current {number(hw.get('tok_s'), 1)}\n"
-            f"GPU util     {sparkline(history.get('gpu_util'))}  current {number(hw.get('gpu_util'), 0)}%\n"
-            f"CPU          {sparkline(history.get('cpu'))}  current {number(hw.get('cpu'), 1)}%\n"
-            f"RAM          {sparkline(history.get('ram_used'))}  current {pct(ram_used, ram_total)}"
-        )
-
-        self.query_one("#history", Static).border_title = "THROUGHPUT  •  RECENT HISTORY"
+        # Request history
         table = self.query_one("#requests", DataTable)
         table.clear()
-        for req in (m.get("requests") or [])[:8]:
+
+        for req in requests[:8]:
+            if not isinstance(req, dict):
+                continue
+
+            finish = str(req.get("finish") or MISSING)
             table.add_row(
                 local_time(req.get("time")),
                 f"{number(req.get('duration_s'))} s",
-                str(req.get("finish") or "—"),
+                f"[{finish_color(req.get('finish'))}]{finish}[/]",
                 integer(req.get("prompt_tokens")),
                 integer(req.get("output_tokens")),
                 number(req.get("decode_tok_s")),
             )
-        if not (m.get("requests") or []):
-            table.add_row("—", "—", "No history", "—", "—", "—")
 
-        stamp = datetime.fromtimestamp(self.last_ok).strftime("%H:%M:%S") if self.last_ok else "never"
-        footer_note = f"● Connected  ·  Last metrics {stamp}"
+        if not table.row_count:
+            table.add_row(
+                MISSING,
+                MISSING,
+                "No history",
+                MISSING,
+                MISSING,
+                MISSING,
+            )
+
+        # Footer: make degraded telemetry visible without hiding last good data.
+        conn_color = p.status_stale if self.last_errors else p.status_connected
+        footer_note = (
+            f"[{conn_color}]●[/] Last successful metrics: {last_success}"
+            f"  ·  Poll interval: {POLL_SECONDS:g}s"
+        )
+
         if self.last_errors:
-            footer_note += " · Partial endpoint errors: " + "; ".join(self.last_errors)
+            footer_note += (
+                f"\n[bold {p.status_busy}]Partial endpoint errors:[/] "
+                + "  ·  ".join(self.last_errors)
+            )
+
         self.query_one("#footnote", Static).update(footer_note)
 
 
