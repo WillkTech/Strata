@@ -48,6 +48,8 @@ STRIP_STATES = ("IDLE", "READING", "GENERATING", "QUEUED", "COMPLETED",
 BASE_URL = os.environ.get("STRATA_URL", "http://127.0.0.1:8000").rstrip("/")
 POLL_SECONDS = max(0.25, float(os.environ.get("STRATA_MONITOR_INTERVAL", "1.0")))
 HTTP_TIMEOUT = max(0.1, float(os.environ.get("STRATA_MONITOR_TIMEOUT", "2.0")))
+# The server answers 401 on /metrics, /status, /slots once a key is set.
+API_KEY = os.environ.get("STRATA_KEY") or os.environ.get("STRATA_API_KEY", "")
 
 
 # ---------------------------------------------------------------------------
@@ -363,13 +365,13 @@ def finish_color(finish: Any) -> str:
 # API
 # ---------------------------------------------------------------------------
 def fetch_json(path: str) -> Any:
-    req = urllib.request.Request(
-        f"{BASE_URL}{path}",
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "strata-tui-monitor/2.0",
-        },
-    )
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "strata-tui-monitor/2.0",
+    }
+    if API_KEY:
+        headers["Authorization"] = f"Bearer {API_KEY}"
+    req = urllib.request.Request(f"{BASE_URL}{path}", headers=headers)
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
         if not 200 <= response.status < 300:
             raise RuntimeError(f"HTTP {response.status}")

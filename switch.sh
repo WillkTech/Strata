@@ -11,6 +11,21 @@ cd "$ROOT"
 PY="$ROOT/.venv/bin/python"
 [ -x "$PY" ] || PY=python3
 
+# The server answers 401 on /metrics once a key is set (serve/server.py _authorized:
+# Authorization: Bearer or x-api-key).  Prefer the environment (.zshrc exports
+# STRATA_KEY; the server itself reads STRATA_API_KEY), fall back to the config's api_key.
+KEY="${STRATA_KEY:-${STRATA_API_KEY:-}}"
+[ -n "$KEY" ] || KEY=$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1])).get("api_key",""))' "$ROOT/strata-iq3_s.json" 2>/dev/null || true)
+
+curl_metrics() {
+  # curl an endpoint that needs the key, sending it when we have one.
+  if [ -n "$KEY" ]; then
+    curl -s -m 2 -H "Authorization: Bearer $KEY" "$@"
+  else
+    curl -s -m 2 "$@"
+  fi
+}
+
 # Reverse video for the state badge, only on a real terminal.
 if [ -t 1 ]; then
   REV=$(printf '\033[7m')
@@ -104,7 +119,7 @@ status_view() {
     DETAIL="no Strata server on port $PORT"
     return 0
   fi
-  JSON=$(curl -s -m 2 "http://127.0.0.1:$PORT/metrics" 2>/dev/null || true)
+  JSON=$(curl_metrics "http://127.0.0.1:$PORT/metrics" 2>/dev/null || true)
   if [ -z "$JSON" ]; then
     BADGE="STARTING"
     DETAIL="PID $PID on port $PORT — /metrics not answering yet"
@@ -137,7 +152,7 @@ start_server_background() {
   printf "Waiting for server to be ready"
   i=0
   while [ "$i" -lt 90 ]; do
-    if curl -s -m 2 "http://127.0.0.1:$PORT/metrics" >/dev/null 2>&1; then
+    if curl_metrics "http://127.0.0.1:$PORT/metrics" >/dev/null 2>&1; then
       echo " — ready."
       return 0
     fi
