@@ -26,7 +26,7 @@ from strata_cli.launch.screens import ConfirmScreen
 from strata_cli.launch.widgets import DARK, LIGHT, Glyphs
 from strata_cli.monitor import MonitorApp
 
-CONNECT = 6                                   # the index of the Connect view (the seventh)
+CONNECT = 7                                   # the index of the Connect view (the eighth)
 
 
 def connect_palette(theme: str, color: bool):

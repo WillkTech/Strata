@@ -35,14 +35,10 @@ pick_python() {
     return 1
   fi
 
-  # The private runtime shipped with the distribution.
-  #
-  # Two layouts are supported, and the relative depth differs between them:
-  #   * an installed distribution: <root>/bin/strata with the runtime at <root>/python/
-  #   * a source checkout:        <root>/bin/strata with no bundled runtime at all
-  # So the parent directory is checked as well as this one. Getting this wrong is silent: the
-  # launcher falls through to whatever Python is on PATH and the bundle stops being self-contained.
+  # The virtualenv or private runtime shipped with the distribution.
   for candidate in \
+      "$HERE/../.venv/bin/python3" "$HERE/.venv/bin/python3" \
+      "$HERE/../../.venv/bin/python3" \
       "$HERE/../python/bin/python3" "$HERE/python/bin/python3" \
       "$HERE/../python/bin/python"  "$HERE/python/bin/python"; do
     if [ -x "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
@@ -129,5 +125,16 @@ esac
 case $PY in
   "$HERE"/../python/*|"$HERE"/python/*) PYTHONNOUSERSITE=1; export PYTHONNOUSERSITE; unset PYTHONHOME PYTHONPATH ;;
 esac
+
+# Sync STRATA_KEY and STRATA_API_KEY for seamless authentication
+if [ -z "${STRATA_KEY:-}" ] && [ -f "$HOME/.zshrc" ]; then
+  _k=$(grep 'export STRATA_KEY=' "$HOME/.zshrc" 2>/dev/null | head -n 1 | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+  [ -n "$_k" ] && export STRATA_KEY="$_k"
+fi
+if [ -n "${STRATA_KEY:-}" ] && [ -z "${STRATA_API_KEY:-}" ]; then
+  export STRATA_API_KEY="$STRATA_KEY"
+elif [ -n "${STRATA_API_KEY:-}" ] && [ -z "${STRATA_KEY:-}" ]; then
+  export STRATA_KEY="$STRATA_API_KEY"
+fi
 
 exec "$PY" "$APP/strata.py" "$@"

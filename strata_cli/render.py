@@ -11,7 +11,7 @@ from strata_cli import nav
 from strata_cli.client import complete_slots
 
 
-VIEWS = ("overview", "serving", "requests", "engine", "hardware", "logs")
+VIEWS = ("overview", "serving", "requests", "engine", "hardware", "logs", "models")
 
 
 def activity_continuity_notice(snapshot: dict) -> str | None:
@@ -565,6 +565,12 @@ def render_view(snapshot: dict, view: str, width: int = 80, height: int = 24,
                     lines.append(notice)
                 lines += [activity_label(row, width) for row in events[-max(1, height - len(lines) - 1):]] \
                     if events else ["No request transitions retained"]
+        elif view == "models":
+            from strata_cli import model_manager
+            st = model_manager.get_status(8000)
+            lines += [f"Server: {st['state'].upper()} (port {st['port']})",
+                      f"Model:  {safe(st.get('model') or 'None', width - 8)}",
+                      "Keys: s Swift | w Qwen | x Stop"]
         else:
             if not tiny:
                 lines += ["More: strata status --json"]
@@ -718,7 +724,7 @@ def render_view(snapshot: dict, view: str, width: int = 80, height: int = 24,
         ram = snapshot.get("ram") or {}
         used, total = ram.get("used"), ram.get("total")
         lines += ["", f"RAM {number(used / 2**30 if isinstance(used, (int, float)) else None, ' GiB', 1)} / {number(total / 2**30 if isinstance(total, (int, float)) else None, ' GiB', 1)}"]
-    else:
+    elif view == "logs":
         activity = snapshot.get("activity") or {}
         lines += ["Recent request activity (redacted; no prompt or tool content)", ""]
         if not activity.get("available"):
@@ -737,6 +743,38 @@ def render_view(snapshot: dict, view: str, width: int = 80, height: int = 24,
                 lines += [activity_label(row, width) for row in events[-capacity:]]
             else:
                 lines.append("No matching request transitions" if filter_text else "No request transitions retained")
+    else:
+        # view == "models"
+        from strata_cli import model_manager
+        root = model_manager.get_repo_root()
+        profiles = model_manager.get_all_profiles(root)
+        st = model_manager.get_status(8000, root)
+        ks = model_manager.get_key_status(8000, root)
+
+        state_str = st['state'].upper()
+        pid_str = f"PID {st['pid']}" if st.get('pid') else "inactive"
+        lines += [
+            "Active Server & Metal Inference Runtime",
+            f"  Status:       {state_str} ({pid_str} on port {st['port']})",
+            f"  Active Model: {st.get('model') or 'None loaded'}",
+            f"  Config Key:   {ks['effective_masked']}",
+            "",
+            "Available Model Profiles",
+        ]
+        for i, p in enumerate(profiles):
+            active_mark = "[ACTIVE]" if (st.get("model") == p["model_name"]) else "[IDLE]  "
+            lines.append(f"  {active_mark} {p['display_name']}")
+            lines.append(f"      Context: {p['context_display']} tokens | Vision: {'GPU Metal' if p['vision'] else 'Off'}")
+            lines.append(f"      Config:  {p['config_file']}")
+
+        lines += [
+            "",
+            "Control Actions & Shortcuts",
+            "  s : Start / Switch to Swift 1.5 Abliterated (512k context, vision)",
+            "  w : Start / Switch to Qwen 3.8 Flash Next (512k context, vision)",
+            "  x : Gracefully stop active server and free unified memory",
+            "  r : Refresh telemetry and health probe",
+        ]
     if not detail:
         lines.append("")
     lines += [f"Sample age {number(age, ' s', 1)}   Source {safe(snapshot.get('source'))}",

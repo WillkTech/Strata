@@ -102,8 +102,9 @@ class Endpoint:
         if path not in ("/v1/telemetry", "/v1/status", "/metrics", "/health"):
             raise ValueError("endpoint is not part of the read-only telemetry contract")
         headers = {"Accept": "application/json", "User-Agent": "Strata-Terminal/0.1"}
-        if self.credential:
-            headers["Authorization"] = "Bearer " + self.credential
+        cred = self.credential or os.environ.get("STRATA_KEY") or os.environ.get("STRATA_API_KEY")
+        if cred:
+            headers["Authorization"] = "Bearer " + cred
         req = urllib.request.Request(self.base_url + path, headers=headers)
         opener = urllib.request.build_opener(_NoRedirect)
         try:

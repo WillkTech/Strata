@@ -102,7 +102,10 @@ class MonitorApp(App):
         Binding("enter", "request_detail", "Row detail", show=False),
         Binding("question_mark", "help", "Help"), Binding("f1", "help", "Help", show=False),
         Binding("b", "browser", "Open in browser", show=False),
-        Binding("7", "view_6", "Connect view", show=False),
+        Binding("8", "view_7", "Connect view", show=False),
+        Binding("s", "model_swift", "Start Swift", show=False),
+        Binding("w", "model_qwen", "Start Qwen", show=False),
+        Binding("x", "model_stop", "Stop server", show=False),
     ]
 
     def __init__(self, endpoint: Endpoint, snapshot: dict | None, *, interval: float = 1.0,
@@ -556,5 +559,44 @@ class MonitorApp(App):
         self._set_view(5)
 
     def action_view_6(self) -> None:
+        self._set_view(6)
+
+    def action_view_7(self) -> None:
         if self.connect_enabled:
-            self._set_view(6)
+            self._set_view(7)
+
+    def action_model_swift(self) -> None:
+        if self.view == 6:
+            self.selection_notice = "Starting Swift 1.5 in background..."
+            self._paint()
+            import threading
+            from strata_cli import model_manager
+            def _start():
+                res = model_manager.start_model("swift", background=True, wait_ready=False)
+                self.selection_notice = res.get("message", "")[:80]
+                self._schedule_poll(force=True)
+            threading.Thread(target=_start, daemon=True).start()
+
+    def action_model_qwen(self) -> None:
+        if self.view == 6:
+            self.selection_notice = "Starting Qwen 3.8 in background..."
+            self._paint()
+            import threading
+            from strata_cli import model_manager
+            def _start():
+                res = model_manager.start_model("qwen", background=True, wait_ready=False)
+                self.selection_notice = res.get("message", "")[:80]
+                self._schedule_poll(force=True)
+            threading.Thread(target=_start, daemon=True).start()
+
+    def action_model_stop(self) -> None:
+        if self.view == 6:
+            self.selection_notice = "Stopping active server..."
+            self._paint()
+            import threading
+            from strata_cli import model_manager
+            def _stop():
+                res = model_manager.stop_server(8000)
+                self.selection_notice = res.get("message", "")[:80]
+                self._schedule_poll(force=True)
+            threading.Thread(target=_stop, daemon=True).start()

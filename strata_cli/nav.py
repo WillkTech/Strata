@@ -10,17 +10,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-NAMES = ("Overview", "Serving", "Requests", "Engine", "Hardware", "Logs", "Connect")
-SHORT = ("Over", "Serve", "Reqs", "Engine", "GPU", "Logs", "Conn")
+NAMES = ("Overview", "Serving", "Requests", "Engine", "Hardware", "Logs", "Models", "Connect")
+SHORT = ("Over", "Serve", "Reqs", "Engine", "GPU", "Logs", "Models", "Conn")
 
 
 def count(connect: bool) -> int:
-    return 7 if connect else 6
+    return 8 if connect else 7
 
 
 def keys(connect: bool) -> str:
-    """The number keys that switch views: "1-6", or "1-7" with the Connect view."""
-    return "1-7" if connect else "1-6"
+    """The number keys that switch views: "1-7", or "1-8" with the Connect view."""
+    return "1-8" if connect else "1-7"
 
 
 def title(index: int) -> str:

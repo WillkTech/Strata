@@ -257,6 +257,70 @@ def save(name: str, value: dict, *, expected_revision: str) -> tuple[dict, str]:
         return value, _revision(data)
 
 
+def probe_server(url: str, timeout: float = 0.5) -> dict:
+    """Test whether a candidate URL is an active Strata server using standard library.
+
+    Distinguishes:
+    - active ready Strata server (status 200)
+    - active Strata server requiring authentication (status 401/403 with Strata error structure)
+    - Strata server in startup state (status 503)
+    - unreachable or unrelated HTTP service
+    """
+    import urllib.request
+    import urllib.error
+
+    clean_url = url.rstrip("/")
+    for probe_path in ("/v1/status", "/metrics", "/v1/models", "/health"):
+        req = urllib.request.Request(
+            f"{clean_url}{probe_path}",
+            headers={"User-Agent": "Strata-Resolver/1.0", "Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=max(0.1, timeout)) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                raw = resp.read(4096)
+                if "application/json" in content_type:
+                    try:
+                        data = json.loads(raw.decode("utf-8"))
+                        if isinstance(data, (dict, list)):
+                            return {"is_strata": True, "state": "ready", "status": resp.status, "data": data}
+                    except Exception:
+                        pass
+                return {"is_strata": True, "state": "ready", "status": resp.status}
+        except urllib.error.HTTPError as e:
+            raw = e.read(2048) if hasattr(e, "read") else b""
+            if e.code in (401, 403):
+                try:
+                    data = json.loads(raw.decode("utf-8"))
+                    if isinstance(data, dict) and "error" in data:
+                        return {"is_strata": True, "state": "auth_required", "status": e.code}
+                except Exception:
+                    pass
+                return {"is_strata": True, "state": "auth_required", "status": e.code}
+            elif e.code == 503:
+                return {"is_strata": True, "state": "starting", "status": e.code}
+            continue
+        except Exception:
+            break
+    return {"is_strata": False, "state": "unreachable", "status": None}
+
+
+def discover_local_instances(candidate_ports: tuple[int, ...] = (8000, 8095), timeout: float = 0.4) -> dict:
+    """Scan candidate local ports for active Strata servers."""
+    verified = []
+    states = {}
+    for p in candidate_ports:
+        res = probe_server(f"http://127.0.0.1:{p}", timeout=timeout)
+        if res.get("is_strata"):
+            verified.append(p)
+            states[p] = res.get("state")
+    return {
+        "verified_ports": verified,
+        "ambiguity": len(verified) > 1,
+        "states": states,
+    }
+
+
 def resolve(*, url: str | None = None, connection: str | None = None,
             credential_env: str | None = None, timeout: float | None = None,
             environment: dict | None = None) -> dict:
@@ -264,6 +328,10 @@ def resolve(*, url: str | None = None, connection: str | None = None,
     selected = connection or (None if url is not None else env.get("STRATA_CONNECTION"))
     if url is not None and connection is not None:
         raise ConnectionError("choose --url or --connection, not both")
+
+    ambiguity = False
+    discovered_ports: list[int] = []
+
     if selected:
         saved, revision = load(selected)
         root, prefix = saved["url"], saved["prefix"]
@@ -271,20 +339,70 @@ def resolve(*, url: str | None = None, connection: str | None = None,
         origins = {"url": "connection", "prefix": "connection", "credential_env": "connection"}
     else:
         revision = None
-        root = url if url is not None else env.get("STRATA_URL", DEFAULT_URL)
         prefix = ""
-        key_ref = "STRATA_API_KEY"
-        origins = {"url": "flag" if url is not None else "environment" if "STRATA_URL" in env else "default",
-                   "prefix": "default", "credential_env": "default"}
+        if url is not None:
+            root = url
+            origins = {"url": "flag", "prefix": "default"}
+        elif "STRATA_URL" in env:
+            root = env["STRATA_URL"]
+            origins = {"url": "environment", "prefix": "default"}
+        else:
+            discovery = discover_local_instances((8000, 8095), timeout=0.3)
+            verified = discovery["verified_ports"]
+            discovered_ports = verified
+            if len(verified) == 1:
+                root = f"http://127.0.0.1:{verified[0]}"
+                origins = {"url": "local_discovery", "prefix": "default"}
+            elif len(verified) > 1:
+                ambiguity = True
+                root = "http://127.0.0.1:8000"
+                origins = {"url": "local_discovery_ambiguous", "prefix": "default"}
+            else:
+                has_local_8000 = any(
+                    Path(p).is_file() for p in (
+                        "strata-iq3_s-512k.json", "strata-iq3_s.json",
+                        "/Volumes/vl/ai/strata/strata-iq3_s-512k.json",
+                    )
+                )
+                root = "http://127.0.0.1:8000" if has_local_8000 else DEFAULT_URL
+                origins = {"url": "default", "prefix": "default"}
+
+        if "STRATA_KEY" in env and "STRATA_API_KEY" not in env:
+            key_ref = "STRATA_KEY"
+            origins["credential_env"] = "environment"
+        elif "STRATA_API_KEY" in env and "STRATA_KEY" not in env:
+            key_ref = "STRATA_API_KEY"
+            origins["credential_env"] = "environment"
+        elif "STRATA_KEY" in env and "STRATA_API_KEY" in env:
+            key_ref = "STRATA_KEY" if (":8000" in root) else "STRATA_API_KEY"
+            origins["credential_env"] = "environment"
+        else:
+            key_ref = "STRATA_KEY" if (":8000" in root) else "STRATA_API_KEY"
+            origins["credential_env"] = "default"
+
     if credential_env is not None:
         key_ref = credential_env
         origins["credential_env"] = "flag"
+
     if timeout is not None and (type(timeout) not in (int, float) or not 0 < timeout <= 30):
         raise ConnectionError("timeout must be greater than zero and at most 30 seconds")
     origins["timeout_s"] = "flag" if timeout is not None else "default"
+
     normalized_url, normalized_prefix = server_url(root), prefix_path(prefix)
-    return {"url": normalized_url, "prefix": normalized_prefix,
-            "base_url": normalized_url + normalized_prefix,
-            "credential_env": credential_name(key_ref), "credential_present": bool(env.get(key_ref)),
-            "timeout_s": timeout if timeout is not None else 3.0,
-            "connection": selected, "connection_revision": revision, "origins": origins}
+    has_key = bool(env.get(key_ref) or env.get("STRATA_KEY") or env.get("STRATA_API_KEY"))
+
+    result = {
+        "url": normalized_url,
+        "prefix": normalized_prefix,
+        "base_url": normalized_url + normalized_prefix,
+        "credential_env": credential_name(key_ref),
+        "credential_present": has_key,
+        "timeout_s": timeout if timeout is not None else 3.0,
+        "connection": selected,
+        "connection_revision": revision,
+        "origins": origins,
+    }
+    if ambiguity:
+        result["ambiguity"] = True
+        result["discovered_ports"] = discovered_ports
+    return result

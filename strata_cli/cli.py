@@ -493,11 +493,33 @@ def parser() -> argparse.ArgumentParser:
     code_sessions = code_sp.add_parser("sessions", help="shared harness sessions")
     code_sessions.add_argument("action", choices=("list",))
     code_sessions.add_argument("--output", choices=("human", "json"), default="human")
+
+    switch = sp.add_parser("switch", help="switch or start local model, check status, or stop active server")
+    switch.add_argument("target", nargs="?", choices=("swift", "qwen", "status", "stop", "monitor", "restart", "1", "2", "3", "4", "5"),
+                        help="model to switch to ('swift' or 'qwen') or action ('status', 'stop', 'monitor')")
+    switch.add_argument("--background", action=argparse.BooleanOptionalAction, default=True,
+                        help="run server in background (default) or foreground")
+    switch.add_argument("--timeout", type=float, default=90.0, help="startup wait timeout in seconds")
+    switch.add_argument("--output", choices=("human", "json"), default="human")
+
+    key_parser = sp.add_parser("key", help="inspect, set, or rotate the server API key")
+    key_sp = key_parser.add_subparsers(dest="key_command", required=False)
+    key_status = key_sp.add_parser("status", help="show authoritative API key configuration and status")
+    key_status.add_argument("--output", choices=("human", "json"), default="human")
+
+    key_set = key_sp.add_parser("set", help="set a new API key across configuration files")
+    key_set.add_argument("new_key", help="the new API key value")
+    key_set.add_argument("--output", choices=("human", "json"), default="human")
+
+    key_rotate = key_sp.add_parser("rotate", help="generate a new random 256-bit API key and save it")
+    key_rotate.add_argument("--output", choices=("human", "json"), default="human")
+
     for one_shot in (profile_create, profile_list, profile_show, profile_validate, profile_set,
                      profile_source, profile_edit, profile_history, profile_rollback, doctor,
                      components_verify, models_list, models_inspect, models_import, calibrate,
                      runtime_start, runtime_status, runtime_verify, runtime_stop, runtime_cleanup, runtime_restart,
-                     *ops_items, bench_run, bench_report, bench_compare, code_sessions, *update_parsers):
+                     *ops_items, bench_run, bench_report, bench_compare, code_sessions, *update_parsers,
+                     switch, key_status, key_set, key_rotate):
         one_shot.add_argument("--json", action="store_true", help="alias for --output json")
         one_shot.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS,
                               help="suppress human informational output")
@@ -1989,10 +2011,116 @@ def _repair_access(a: argparse.Namespace) -> int:
     return 0 if not report["failed"] else 5
 
 
+def _switch_command(a: argparse.Namespace) -> int:
+    from strata_cli import model_manager
+    machine = getattr(a, "json", False) or getattr(a, "output", None) == "json"
+    target = getattr(a, "target", None)
+    if not target:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            return model_manager.interactive_menu()
+        res = model_manager.get_status()
+        if machine:
+            print(json.dumps({"schema_version": 1, **res}, ensure_ascii=False))
+        else:
+            print(res.get("message", ""))
+        return 0
+
+    target = str(target).lower()
+    if target in ("status", "3"):
+        res = model_manager.get_status()
+        if machine:
+            print(json.dumps({"schema_version": 1, **res}, ensure_ascii=False))
+        else:
+            print(res.get("message", ""))
+        return 0
+    elif target in ("stop", "4"):
+        res = model_manager.stop_server()
+        if machine:
+            print(json.dumps({"schema_version": 1, **res}, ensure_ascii=False))
+        else:
+            print(res.get("message", ""))
+        return 0 if res.get("ok") else 1
+    elif target in ("monitor", "5"):
+        from strata_cli import monitor_commands
+        return monitor_commands.main(["monitor"])
+    elif target in ("restart",):
+        res = model_manager.stop_server()
+        if not res.get("ok"):
+            if machine:
+                print(json.dumps({"schema_version": 1, **res}, ensure_ascii=False))
+            else:
+                print(res.get("message", ""))
+            return 1
+        st = model_manager.get_status()
+        target_profile = st.get("profile") or "swift"
+        start_res = model_manager.start_model(target_profile, background=a.background, wait_ready=True, timeout=a.timeout)
+        if machine:
+            print(json.dumps({"schema_version": 1, **start_res}, ensure_ascii=False))
+        else:
+            print(start_res.get("message", ""))
+        return 0 if start_res.get("ok") else 1
+    else:
+        prof_id = model_manager.canonical_profile_id(target)
+        if not prof_id:
+            msg = f"Unknown model target '{target}'. Use 'swift' or 'qwen'."
+            if machine:
+                print(json.dumps({"schema_version": 1, "ok": False, "error": msg}))
+            else:
+                print(f"strata: {msg}", file=sys.stderr)
+            return 2
+        res = model_manager.start_model(prof_id, background=a.background, wait_ready=True, timeout=a.timeout)
+        if machine:
+            print(json.dumps({"schema_version": 1, **res}, ensure_ascii=False))
+        else:
+            print(res.get("message", ""))
+        return 0 if res.get("ok") else 1
+
+
+def _key_command(a: argparse.Namespace) -> int:
+    from strata_cli import model_manager
+    machine = getattr(a, "json", False) or getattr(a, "output", None) == "json"
+    action = getattr(a, "key_command", None) or "status"
+    if action == "status":
+        res = model_manager.get_key_status()
+        if machine:
+            print(json.dumps({"schema_version": 1, **res}, ensure_ascii=False))
+        else:
+            print("--- Strata API Key Status ---")
+            print(f"Effective Key:      {res['effective_masked']}")
+            print(f"STRATA_KEY env:     {res['env_STRATA_KEY']}")
+            print(f"STRATA_API_KEY env: {res['env_STRATA_API_KEY']}")
+            for cfg, masked in res.get("config_keys", {}).items():
+                print(f"Config {cfg}:  {masked}")
+            if res["server_running"]:
+                auth_str = "Verified matching" if res["server_authenticated"] else "Auth mismatch (restart needed)"
+                print(f"Server (PID {res['server_pid']}):  {auth_str}")
+        return 0
+    elif action == "set":
+        new_k = getattr(a, "new_key", "")
+        res = model_manager.set_api_key(new_k)
+        if machine:
+            print(json.dumps({"schema_version": 1, **res}, ensure_ascii=False))
+        else:
+            print(res.get("message", ""))
+        return 0 if res.get("ok") else 1
+    elif action == "rotate":
+        res = model_manager.rotate_api_key()
+        if machine:
+            print(json.dumps({"schema_version": 1, **res}, ensure_ascii=False))
+        else:
+            print(res.get("message", ""))
+        return 0 if res.get("ok") else 1
+    return 0
+
+
 def _run(a: argparse.Namespace) -> int:
     try:
         if a.command == "serve":
             return _serve(a)
+        if a.command == "switch":
+            return _switch_command(a)
+        if a.command == "key":
+            return _key_command(a)
         if a.command == "install":
             return _install(a)
         if a.command == "repair-access":
@@ -2090,22 +2218,26 @@ def main(argv: list[str] | None = None) -> int:
         private_files.adopt_user_defaults()      # what this process creates belongs to the user even when it runs as administrator
     except ImportError:                          # a thin bundle ships without strata_control
         pass
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if not raw_args and sys.stdin.isatty() and sys.stdout.isatty():
+        from strata_cli import model_manager
+        return model_manager.interactive_menu()
     ap = parser()
     a, extras = ap.parse_known_args(argv)
-    a.raw_argv = list(sys.argv[1:] if argv is None else argv)
+    a.raw_argv = raw_args
     if extras:
         if getattr(a, "command", None) in ("launch", "connect"):
             from strata_cli.launch import cmd as launch_cmd
             print("strata: " + launch_cmd.unknown_option_message(a.command, extras, ap), file=sys.stderr)
             return 2
         ap.error("unrecognized arguments: " + " ".join(extras))
-    if getattr(a, "json", False) and a.command not in ("status", "monitor", "logs", "connection", "config"):
+    if getattr(a, "json", False) and a.command not in ("status", "monitor", "logs", "connection", "config", "switch", "key"):
         if a.output == "jsonl":
             return _serve_error(a, "--json is one-shot only; use --output jsonl for foreground events")
         a.output = "json"
     if not getattr(a, "quiet", False) or getattr(a, "output", "human") in ("json", "jsonl"):
         return _run(a)
-    if a.command in ("status", "monitor", "logs", "connection", "config") or \
+    if a.command in ("status", "monitor", "logs", "connection", "config", "switch", "key") or \
             (a.command == "serve" and not a.plan):
         return _run(a)
     captured = _QuietCapture()
