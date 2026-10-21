@@ -4510,6 +4510,11 @@ def data_folder(requested: str | None) -> tuple:
     return dest, elsewhere
 
 
+def data_folder_for(a) -> tuple:
+    """data_folder() with the answers on the command line (--data-dir, etc.)."""
+    return data_folder(getattr(a, "data_dir", None))
+
+
 def write_config(path: Path, cfg: dict):
     """A run config, written whole or not at all (#459): to a temporary file first, then moved over the old one, so
     a setup stopped half-way (a closed window, a full disk) never leaves an empty strata-*.json behind."""
