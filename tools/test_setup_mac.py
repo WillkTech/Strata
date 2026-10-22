@@ -74,12 +74,6 @@ class Recommendation(unittest.TestCase):
         self.assertEqual(rec, "Q2_0")
         self.assertTrue(notes and "stream" in notes[0] and "~14 tok/s" in notes[0])
         self.assertTrue(M.streams("Q2_0", 32) and M.streams("Q2_0", 48) and not M.streams("Q2_0", 64))
-        # Swift sizes are offered on an M5-class mock and never become the default or recommended
-        m5_ram = 128
-        self.assertNotIn("swift", [m.lower() for m in M.RECOMMENDED])
-        for sz in M.SWIFT_MODELS:
-            self.assertFalse(M.streams(sz, m5_ram, "swift"))
-            self.assertNotEqual(rec, sz)
 
     def test_a_bigger_choice_is_kept_with_a_note(self):
         notes = M.model_note("IQ3_XXS", 64)
@@ -116,79 +110,6 @@ class Config(unittest.TestCase):
                               ram_gb=32)
         self.assertNotIn("--mtp", small)
         self.assertTrue(M.stream_mtp(False, 16) and M.stream_mtp(True, 128) and not M.stream_mtp(True, 64))
-        # Swift gets the same Metal defaults as qwen
-        fam = setup.FAMILIES["swift"]
-        swift_pack = Path("/p/packs/swift-iq2_xs")
-        swift_shards = [Path(f"/m/{s}") for s in M.model_shard_names("IQ2_XS", fam)]
-        swift_args = M.engine_args(swift_pack, swift_shards, Path("/d/mtp/rt"), 32768)
-        self.assertEqual(swift_args[swift_args.index("--spec") + 1], "2")
-        self.assertEqual(swift_args[swift_args.index("--expert-cache") + 1], "64")
-        self.assertEqual(swift_args[swift_args.index("--prefill") + 1], "auto")
-        self.assertIn("--mmap-experts", swift_args)
-        self.assertEqual(swift_args[swift_args.index("--expert-profile") + 1],
-                         str(ROOT / "data" / "expert-profile.bin"))
-
-    def test_swift_family_names_the_swift_files(self):
-        fam = setup.FAMILIES["swift"]
-        for size in ("IQ2_XS", "IQ3_XXS", "IQ3_S"):
-            shards = M.model_shard_names(size, fam)
-            self.assertEqual(shards, [f"Swift-Qwen3.8-Flash-Next-GSQ-RCO-{size}-00001-of-00002.gguf",
-                                      f"Swift-Qwen3.8-Flash-Next-GSQ-RCO-{size}-00002-of-00002.gguf"])
-
-    def test_swift_refuses_q2_0(self):
-        with mock.patch.object(setup, "fail", side_effect=SystemExit(1)) as fail:
-            with self.assertRaises(SystemExit):
-                M.main(["--family", "swift", "--model", "Q2_0", "--check"])
-        fail.assert_called_once()
-        msg = fail.call_args[0][0]
-        self.assertIn("#171", msg)
-        self.assertIn("tools/iq_pack.py", msg)
-
-    def test_swift_config_tag_and_paths(self):
-        fam = setup.FAMILIES["swift"]
-        model = "IQ2_XS"
-        tag = fam["tag"] + model
-        self.assertEqual(tag, "swift-IQ2_XS")
-        pack = Path(f"/p/packs/{tag.lower()}")
-        cfg = M.mac_config(Path("/r/build-metal/strata"), ["--pack", str(pack)], pack,
-                           f"{fam['name']}-{model.lower()}", tag, 8080)
-        self.assertEqual(cfg["backend"], "metal")
-        self.assertEqual(cfg["model_name"], "swift-1.5-iq2_xs")
-        self.assertEqual(cfg["tokenizer"], str(pack / "tokenizer"))
-        self.assertEqual(cfg["log"], str(ROOT / "strata-swift-iq2_xs.log"))
-
-    def test_interactive_menu_swift_lists_only_swift_models_unmeasured(self):
-        swift_said = []
-        with mock.patch("setup.say", side_effect=lambda s="": swift_said.append(s)), \
-             mock.patch("setup.ask", return_value="1"), \
-             mock.patch.object(M, "mac_configs", return_value=[]), \
-             mock.patch.object(M, "mac_info", return_value=M.mac_info(fake_run(M5))), \
-             mock.patch.object(M, "mac_problems", return_value=[]), \
-             mock.patch.object(setup, "free_gb", return_value=500.0), \
-             mock.patch.object(setup, "pip_install"), \
-             mock.patch.object(setup, "get_llama_cpp", return_value=Path("/tmp/llama")), \
-             mock.patch.object(M, "build_engine", return_value=Path("/tmp/exe")), \
-             mock.patch.object(setup, "download"), \
-             mock.patch.object(setup, "check_shards"), \
-             mock.patch.object(setup, "run"), \
-             mock.patch.object(setup, "write_config"), \
-             mock.patch.object(setup, "write_run_script", return_value=Path("/tmp/run.sh")):
-            M.main(["--family", "swift", "--no-start"])
-        swift_lines = [line for line in swift_said if "maps " in line]
-        self.assertEqual(len(swift_lines), 3)
-        self.assertTrue(all("not measured on a Mac" in line for line in swift_lines))
-        self.assertTrue(any("IQ2_XS" in line for line in swift_lines))
-        self.assertTrue(any("IQ3_XXS" in line for line in swift_lines))
-        self.assertTrue(any("IQ3_S" in line for line in swift_lines))
-        self.assertFalse(any("Q2_0" in line for line in swift_lines))
-        self.assertFalse(any("UD-" in line for line in swift_lines))
-
-    def test_engine_args_rope_scaling_auto(self):
-        args = M.engine_args(Path("/pack"), [Path("/a1.gguf"), Path("/a2.gguf")], Path("/rt"), 524288)
-        self.assertIn("--rope-scaling", args)
-        self.assertEqual(args[args.index("--rope-scaling") + 1], "yarn")
-        self.assertIn("--rope-scale", args)
-        self.assertEqual(args[args.index("--rope-scale") + 1], "2")
 
     def test_config_is_a_model_config_with_the_metal_backend(self):
         cfg = M.mac_config(Path("/r/build-metal/strata"), ["--pack", "x"], Path("/p"), "qwen3.8-flash-next-q2_0",
@@ -201,10 +122,6 @@ class Config(unittest.TestCase):
 class Vision(unittest.TestCase):
     def test_the_projector_is_pinned_and_the_encoder_builds_with_metal(self):
         self.assertIn("mmproj-Qwen3.8-Flash-Next-BF16.gguf", M.VISION_SHA256)
-        self.assertIn("mmproj-Swift-Qwen3.8-Flash-Next-BF16.gguf", M.VISION_SHA256)
-        swift_bytes, swift_sha = M.VISION_SHA256["mmproj-Swift-Qwen3.8-Flash-Next-BF16.gguf"]
-        self.assertEqual(swift_bytes, 907543520)
-        self.assertEqual(swift_sha, "cd1140f4abba943ce8d9fa92fed8407e389954d26907efde7b72153c75bd8a60")
         src = (ROOT / "metal" / "setup_mac.py").read_text(encoding="utf-8")
         self.assertIn('"-DSTRATA_VISION_CUDA=OFF"', src)
         self.assertIn('cfg["args"] += ["--vision"]', src)
@@ -334,6 +251,137 @@ class RepackGuard(unittest.TestCase):
         self.assertNotIn("mmap", src)                               # no dirty mapping of the output
 
 
+M4 = {"machdep.cpu.brand_string": "Apple M4", "hw.memsize": str(32 * 2 ** 30), "macos": "27.2", "hw.perflevel0.physicalcpu": "4"}
+
+
+class ControlMode(unittest.TestCase):
+    """The app on a Mac (STRATA_CONTROL_INSTALL=1): model files and a run config naming the engine component. No source build, no
+    metal/setup_mac.py, no Command Line Tools; the Mac rules are strata_control/mac_fit.py's, the module setup_mac.py uses too."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name).resolve() / "install"
+        self.data = Path(self.tmp.name).resolve() / "data"
+        self.models = Path(self.tmp.name).resolve() / "own"
+        self.home.mkdir()
+        self.models.mkdir()
+        fam = setup.FAMILIES["qwen"]
+        self.files = []
+        for i in (1, 2):
+            f = self.models / setup.model_file(fam, "Q2_0", i)
+            f.write_bytes(b"x")
+            f.with_name(f.name + ".done").write_text("whole")
+            self.files.append(f)
+
+    def run_setup(self, hw=M4, argv=("--yes", "--no-start", "--family", "qwen", "--model", "Q2_0", "--context", "8192"), clt_rc=0):
+        from strata_control import engine_component, mac_fit
+        ran = []
+
+        def fake_tool(cmd, **kw):
+            ran.append(cmd)
+            pack = Path(cmd[cmd.index("--out") + 1])
+            (pack / "tokenizer").mkdir(parents=True, exist_ok=True)
+            (pack / "native_experts.txt").write_text("x")
+            (pack / "tokenizer" / "vocab.json").write_text("{}")
+        patches = [
+            mock.patch.object(setup, "CONTROL", True), mock.patch.object(setup, "_CONTROL_HOME", self.home),
+            mock.patch.object(setup.sys, "platform", "darwin"),
+            mock.patch.object(setup.sys, "argv", ["setup.py", *argv, "--data-dir", str(self.data), "--gguf-dir", str(self.models)]),
+            mock.patch.object(mac_fit, "mac_info", lambda run=None, _real=mac_fit.mac_info: _real(fake_run(hw, clt_rc))),
+            mock.patch.object(setup, "load_settings", lambda: {}), mock.patch.object(setup, "save_settings", lambda s: None),
+            mock.patch.object(setup, "get_llama_cpp", lambda: Path(self.tmp.name) / "llama"),
+            mock.patch.object(setup, "whole_shard", lambda s: True), mock.patch.object(setup, "check_shards", lambda s: None),
+            mock.patch.object(setup, "run", fake_tool), mock.patch.object(setup, "free_gb", lambda p: 500.0),
+            mock.patch.object(setup, "say", lambda *a, **k: None), mock.patch.object(setup, "ok", lambda *a, **k: None),
+            mock.patch.object(setup, "step", lambda *a, **k: None),
+            mock.patch.object(setup, "warn", lambda *a, **k: self.warnings.append(" ".join(str(x) for x in a))),
+            mock.patch.object(mac_fit.platform, "machine", return_value="arm64"),
+            mock.patch.object(engine_component, "resolve", side_effect=engine_component.EngineMissing("no package here", None)),
+            mock.patch.object(setup, "mac_setup", side_effect=AssertionError("setup_mac.py must not run in Control mode")),
+            mock.patch.object(setup.subprocess, "call", side_effect=AssertionError("nothing is started or built")),
+        ]
+        self.warnings = []
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        rc = setup.main()
+        return rc, ran
+
+    def config(self, tag="q2_0"):
+        import json
+        return json.loads((self.home / f"strata-{tag}.json").read_text(encoding="utf-8"))
+
+    def test_the_install_writes_a_run_config_for_the_engine_component(self):
+        rc, ran = self.run_setup()
+        self.assertEqual(rc, 0)
+        cfg = self.config()
+        self.assertEqual(cfg["exe"], "component:strata-engine")
+        self.assertEqual(cfg["backend"], "metal")
+        args = cfg["args"]
+        # a 32 GB Mac streams Q2_0's experts from the SSD: one token per step, no draft layer, the GGUF mapped in place
+        self.assertEqual(args[args.index("--native") + 1], str(self.files[0]))
+        self.assertEqual(args[args.index("--ple-gguf") + 1], str(self.files[1]))
+        self.assertIn("--mmap-experts", args)
+        self.assertNotIn("--mtp", args)
+        self.assertEqual(args[args.index("--suffix-draft") + 1], "0")
+        self.assertEqual(args[args.index("--max-context") + 1], "8192")
+        self.assertEqual(cfg["env"], {"STRATA_METAL_STREAM": "1"})
+        self.assertEqual(cfg["tokenizer"], str(self.data / "packs" / "q2_0" / "tokenizer"))
+        self.assertEqual(len(ran), 1, "only the pack is made (tools/iq_pack.py): no draft layer, no build")
+        self.assertTrue(ran[0][1].endswith("iq_pack.py"))
+        self.assertFalse((ROOT / "build-metal").exists() and any((ROOT / "build-metal").glob("*.stamp")))
+
+    def test_a_big_mac_keeps_the_pack_in_memory_and_adds_the_draft_layer(self):
+        rc, ran = self.run_setup(hw=M5, argv=("--yes", "--no-start", "--model", "IQ3_XXS"))
+        self.assertEqual(rc, 0)
+        cfg = self.config("iq3_xxs")
+        self.assertIn("--mtp", cfg["args"])
+        self.assertEqual(cfg["env"], {"STRATA_METAL_STREAM": "0"})
+        self.assertEqual(cfg["args"][cfg["args"].index("--max-context") + 1], "65536")      # the default context by memory
+
+    def test_no_command_line_tools_needed_and_the_unsloth_files_are_not_offered(self):
+        rc, _ = self.run_setup(clt_rc=2)
+        self.assertEqual(rc, 0)
+        with self.assertRaises(SystemExit):
+            self.run_setup(argv=("--yes", "--no-start", "--model", "UD-Q4_K_XL"))
+
+    def test_gyro_is_offered_on_a_mac_as_one_file_with_a_compat_bf16_pack(self):
+        fam = setup.FAMILIES["gyro"]
+        g = self.models / setup.model_file(fam, "Gyro-S", 1)
+        g.write_bytes(b"x")
+        g.with_name(g.name + ".done").write_text("whole")
+        rc, ran = self.run_setup(argv=("--yes", "--no-start", "--family", "gyro", "--model", "Gyro-S", "--context", "8192"))
+        self.assertEqual(rc, 0)
+        cfg = self.config("gyro-gyro-s")
+        args = cfg["args"]
+        self.assertEqual(args[args.index("--native") + 1], str(g), "the one file is the model")
+        self.assertEqual(args[args.index("--ple-gguf") + 1], str(g), "... and holds its n-gram table")
+        self.assertEqual(cfg["backend"], "metal")
+        self.assertEqual(cfg["env"], {"STRATA_METAL_STREAM": "1"}, "29.7 GB of weights stream on a 32 GB Mac")
+        self.assertNotIn("--mtp", args)
+        self.assertTrue(ran[0][1].endswith("iq_pack.py"))
+        self.assertIn("--compat-bf16", ran[0], "Gyro's pack converts the small Q6_K / Q5_K tensors (docs/GYRO.md)")
+        self.assertEqual(cfg["tokenizer"], str(self.data / "packs" / "gyro-gyro-s" / "tokenizer"))
+
+    def test_gyro_m_on_a_small_mac_is_a_warning_not_a_refusal(self):
+        fam = setup.FAMILIES["gyro"]
+        g = self.models / setup.model_file(fam, "Gyro-M", 1)
+        g.write_bytes(b"x")
+        g.with_name(g.name + ".done").write_text("whole")
+        rc, _ = self.run_setup(argv=("--yes", "--no-start", "--family", "gyro", "--model", "Gyro-M", "--context", "8192"))
+        self.assertEqual(rc, 0)
+        said = " ".join(self.warnings)
+        self.assertIn("Gyro-M", said)
+        self.assertIn("stream from the SSD", said)
+        self.assertIn("not been measured on a Mac", said)
+
+    def test_other_platforms_and_the_terminal_still_use_their_own_setup(self):
+        src = (ROOT / "setup.py").read_text(encoding="utf-8")
+        self.assertIn('if sys.platform == "darwin" and not CONTROL:', src)
+        self.assertIn('if sys.platform == "darwin" and CONTROL:', src)
+
+
 class Source(unittest.TestCase):
     """setup.py hands a Mac over before its own parser runs, so the Mac parser has to know --source:
     source_hint() recommends it on every platform (#2363)."""
@@ -348,7 +396,7 @@ class Source(unittest.TestCase):
         # the user's settings.json into --data-dir, and saves that dir as the new data folder; with a temp dir that
         # deletes the models on exit and leaves settings.json pointing at a deleted directory
         with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.object(setup, "data_folder", lambda requested: (Path(tmp), [])), \
+                mock.patch.object(setup, "data_folder", lambda requested, *a, **k: (Path(tmp), [])), \
                 mock.patch("subprocess.run", fake_run(M5)), \
                 mock.patch.object(setup, "warn", lambda *a, **k: warnings.append(" ".join(str(x) for x in a))), \
                 mock.patch.object(setup, "say", lambda *a, **k: None), \

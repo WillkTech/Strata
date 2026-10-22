@@ -10,6 +10,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <sys/sysctl.h>
 #endif
 
 using namespace strata::core;
@@ -52,6 +54,16 @@ int main() {
     // Test the real provider without assuming any particular amount of free RAM.
     const auto available = available_host_bytes();
     check(!available || conversation_memory_admit(available, 0, 0), "provider returns bytes or unknown");
+#if defined(__APPLE__)
+    // The Apple provider must be known and physically bounded.  Compare with total physical memory,
+    // not with a second available reading: other processes can allocate between calls.
+    uint64_t phys = 0;
+    size_t len = sizeof phys;
+    check(sysctlbyname("hw.memsize", &phys, &len, nullptr, 0) == 0 && phys != 0,
+          "macOS physical-memory API is available");
+    check(available.has_value() && *available <= phys,
+          "macOS provider returns a known, physically bounded sample");
+#endif
 #if defined(_WIN32)
     // Unknown must fail closed in production, but must not let a broken Windows provider pass this test.
     // Compare with total physical memory, not a second available reading: other processes can allocate

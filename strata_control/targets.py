@@ -49,3 +49,5 @@ def backend_supported(backend: str, target: str | None = None) -> tuple[bool, st
         return True, ""
     return False, (f"{backend} is not a supported combination on {target}; it is supported on "
                    f"{', '.join(platforms)}. Unsupported combinations are not attempted.")
+
+

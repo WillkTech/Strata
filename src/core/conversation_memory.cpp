@@ -293,19 +293,21 @@ std::optional<HostMemoryReading> sample_host_memory() {
     uint64_t phys = 0;
     size_t len = sizeof phys;
     if (sysctlbyname("hw.memsize", &phys, &len, nullptr, 0) != 0 || phys == 0) return {};
-    vm_statistics64_data_t vs;
-    mach_msg_type_number_t cnt = HOST_VM_INFO64_COUNT;
-    if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vs, &cnt) != KERN_SUCCESS) return {};
-    const double pg = (double) vm_page_size;
-    const double free_b = vs.free_count * pg;
-    const double purge_b = vs.purgeable_count * pg;
-    const double inact_b = vs.inactive_count * pg;
-    const double spec_b = vs.speculative_count * pg;
-    const double ext_b = vs.external_page_count * pg;
-    // Page calculation matching arena_avail (metal/src/engine/arena_budget.h:105-107):
-    // free + purgeable + min(inactive + speculative, file_backed)
-    const double avail_b = free_b + purge_b + std::min(inact_b + spec_b, ext_b);
-    return combine((uint64_t) avail_b, phys, CgroupScan{}, memory_limit_bytes());
+    vm_statistics64_data_t vs{};
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t) &vs, &count) != KERN_SUCCESS) return {};
+    const double page = (double) vm_page_size;
+    const double free_b = (double) vs.free_count * page;
+    const double purge_b = (double) vs.purgeable_count * page;
+    const double inactive_b = (double) vs.inactive_count * page;
+    const double speculative_b = (double) vs.speculative_count * page;
+    const double external_b = (double) vs.external_page_count * page;
+    // The same "available" the Metal arena uses (metal/src/engine/arena_budget.h, arena_avail):
+    // free + purgeable + min(inactive + speculative, file-backed).  This is deliberately NOT
+    // expert_source.cpp's host_available_memory(), which credits free + inactive + purgeable and
+    // would count pages the arena does not treat as available.
+    const double available_b = free_b + purge_b + std::min(inactive_b + speculative_b, external_b);
+    return combine((uint64_t) available_b, phys, CgroupScan{}, memory_limit_bytes());
 #else
     return {};
 #endif

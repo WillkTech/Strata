@@ -15,12 +15,13 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import Input, Static
 
-from strata_cli import nav
+from strata_cli import nav, switcher
 from strata_cli.client import ClientError, Endpoint
 from strata_cli.dashboard import MonitorHistory, render_dashboard
 from strata_cli.detail_dashboard import render_detail_dashboard
 from strata_cli.logs import ActivityContinuity
 from strata_cli.render import VIEWS, render_view, request_rows, safe
+import urllib.parse
 
 
 def choose_glyphs(requested: str, encoding: str | None, term: str | None) -> str:
@@ -86,6 +87,7 @@ class MonitorApp(App):
         for i, name in enumerate(VIEWS)
     ] + [
         Binding("q", "quit", "Detach"), Binding("ctrl+c", "quit", "Detach", show=False),
+        Binding("m", "switch_model", "Switch model"), Binding("s", "switch_model", "Switch model", show=False),
         Binding("space", "freeze", "Freeze"), Binding("r", "refresh", "Refresh"),
         Binding("tab", "cycle_serving_pane", "Next pane", priority=True),
         Binding("shift+tab", "previous_serving_pane", "Previous pane", show=False, priority=True),
@@ -245,10 +247,10 @@ class MonitorApp(App):
                 display.highlight_regex(r"\[(?:AUTH REQUIRED|INCOMPATIBLE|DISCONNECTED|NO TELEMETRY)\]", "bold red")
                 display.highlight_regex(r"GPU \d+", f"bold {accent}")
         self.query_one("#content", Static).update(display)
-        idle_message = ("Read only  |  q keeps server on" if size.width < 60 else
-                        "Read only  |  q detaches without stopping Strata")
+        idle_message = ("m switch  |  q detach" if size.width < 65 else
+                        "m switch model  |  q detaches without stopping Strata")
         if self.classic and self.classic.get("tip"):             # the classic Windows console: one line about the full look
-            idle_message = ("Read only  |  q detaches  |  " if size.width >= 100 else "") + self.classic["tip"]
+            idle_message = ("m switch  |  q detaches  |  " if size.width >= 100 else "") + self.classic["tip"]
         msg = self.error or self.selection_notice or ("Connecting to Strata" if self.connection_state == "connecting" else
                              "Telemetry unavailable; status only" if self.connection_state == "telemetry_unavailable" else
                              "Frozen display; collection continues" if self.frozen else
@@ -328,6 +330,81 @@ class MonitorApp(App):
             opened = False
         self.error = f"Opened {url} in your browser" if opened else f"Open {url} in a browser (none could be started here)"
         self._paint()
+
+    def _current_port(self) -> int:
+        root = getattr(self.endpoint, "root", "") or getattr(self.endpoint, "base_url", "")
+        if root:
+            try:
+                p = urllib.parse.urlsplit(root).port
+                if p:
+                    return p
+            except Exception:
+                pass
+        return 8080
+
+    def action_switch_model(self) -> None:
+        if self.closing:
+            return
+        port = self._current_port()
+        models = switcher.discover_models()
+        status = switcher.get_active_server_status(port)
+
+        def on_chosen(choice: str | None) -> None:
+            if not choice or choice == "cancel":
+                return
+            if choice == "stop":
+                asyncio.create_task(self._perform_stop_server(port))
+            elif choice.startswith("model:"):
+                model_id = choice[len("model:"):]
+                chosen = next((m for m in models if m["id"] == model_id), None)
+                if chosen:
+                    asyncio.create_task(self._perform_switch_model(chosen, port))
+
+        self.push_screen(switcher.ModelSwitchScreen(status, models), on_chosen)
+
+    async def _perform_stop_server(self, port: int) -> None:
+        self.selection_notice = f"Stopping server on port {port}..."
+        self._paint()
+        stopped = await asyncio.to_thread(switcher.stop_server_on_port, port)
+        if stopped:
+            self.selection_notice = f"Server on port {port} stopped. GPU memory freed."
+            self.connection_state = "disconnected"
+        else:
+            self.error = f"Failed to stop process on port {port}"
+        self._schedule_poll(force=True)
+
+    async def _perform_switch_model(self, model: dict, target_port: int) -> None:
+        port = model.get("port") or target_port
+        label = model.get("label", model["id"])
+        self.selection_notice = f"Stopping active server on port {port}..."
+        self._paint()
+        await asyncio.to_thread(switcher.stop_server_on_port, port)
+
+        self.selection_notice = f"Starting {label} on port {port}..."
+        self.connection_state = "connecting"
+        self._paint()
+
+        try:
+            await asyncio.to_thread(switcher.launch_model, model, port)
+        except Exception as e:
+            self.error = f"Failed to launch model: {e}"
+            self.selection_notice = None
+            self._paint()
+            return
+
+        self.selection_notice = f"Waiting for server to be ready on port {port}..."
+        self._paint()
+
+        ready = await switcher.wait_for_server_ready(port, timeout=120.0)
+        if ready:
+            self.selection_notice = f"Switched to {model.get('model_name', label)} (ready on port {port})"
+            self.error = None
+            self.failures = 0
+            self._schedule_poll(force=True)
+        else:
+            self.error = f"Server started but not answering on port {port}; check logs"
+            self.selection_notice = None
+            self._paint()
 
     def on_resize(self, event) -> None:
         self._paint(event.size)
@@ -466,7 +543,7 @@ class MonitorApp(App):
             self._paint()
 
     def action_help(self) -> None:
-        self.error = f"{nav.keys(self.connect_enabled)}/Left/Right views  Tab pane  Up/Down/PgUp/PgDn/Home/End rows  Enter detail  Space freeze  r refresh  t theme  q detach"
+        self.error = f"{nav.keys(self.connect_enabled)}/Left/Right views  m switch model  Tab pane  Up/Down/PgUp/PgDn/Home/End rows  Enter detail  Space freeze  r refresh  t theme  q detach"
         self._paint()
 
     def action_request_detail(self) -> None:
