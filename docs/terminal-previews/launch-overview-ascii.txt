@@ -1,6 +1,6 @@
 # strata monitor Overview in the classic Windows console mode (--glyphs ascii, or detected): no characters Consolas lacks
 
-STRATA  Serving   http://127.0.0.1:8080   IQ3_S 128K                        * Generating a reply · 3%   [LIVE]
+STRATA  Serving   http://127.0.0.1:8000   IQ3_S 128K                        * Generating a reply · 3%   [LIVE]
 [1 Overview]  2 Serving  3 Requests  4 Engine  5 Hardware  6 Logs  7 Connect  
 --------------------------------------------------------------------------------------------------------------
 Model state  Idle  Reading  [Generating]  Queued  Error                                120 / 4,096 tokens · 3%

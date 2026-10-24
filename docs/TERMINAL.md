@@ -7,10 +7,10 @@ For the shortest path, use the [terminal quick start](TERMINAL_QUICKSTART.md). T
 Read a server, watch it and start one:
 
 ```sh
-strata status --url http://127.0.0.1:8095
-strata status --url http://127.0.0.1:8095 --json
-strata monitor --url http://127.0.0.1:8095 --once
-strata serve --profile path/to/strata-model.json --port 8095
+strata status --url http://127.0.0.1:8000
+strata status --url http://127.0.0.1:8000 --json
+strata monitor --url http://127.0.0.1:8000 --once
+strata serve --profile path/to/strata-model.json --port 8000
 ```
 
 Discover setup-written model run configs in an installation without loading the engine:
@@ -137,14 +137,14 @@ To measure the **running** server after selecting the intended model and batchin
 strata bench run --profile four-gpu                  # the standard benchmark (docs/BENCHMARK_PROTOCOL.md)
 strata bench run --profile four-gpu --suite serving-smoke --concurrency 8 --out ./bench-smoke-01
 strata bench report ./bench-smoke-01 --output json
-strata bench run --url http://127.0.0.1:8095 --suite parallel-mixed-v1 --concurrency 8 --repeat 3 --out ./bench-mixed-01
+strata bench run --url http://127.0.0.1:8000 --suite parallel-mixed-v1 --concurrency 8 --repeat 3 --out ./bench-mixed-01
 strata bench run --profile four-gpu --suite parallel-overload-v1 --concurrency 48 --out ./bench-overload-01
 strata bench run --profile four-gpu --suite parallel-cancel-v1 --concurrency 8 --out ./bench-cancel-01
 strata bench run --profile four-gpu --suite parallel-prefill-cancel-v1 --concurrency 8 --out ./bench-prefill-cancel-01
 strata runtime start --profile four-gpu
 strata bench run --profile four-gpu --require-managed-match --suite parallel-mixed-v1 --concurrency 8 --repeat 3 --condition baseline --out ./bench-baseline
 # Attach the read-only monitor in a separate terminal, then repeat the same workload.
-# strata monitor --url http://127.0.0.1:8095 --interval 2
+# strata monitor --url http://127.0.0.1:8000 --interval 2
 strata bench run --profile four-gpu --require-managed-match --suite parallel-mixed-v1 --concurrency 8 --repeat 3 --condition monitor-default --out ./bench-monitored
 strata bench compare ./bench-baseline ./bench-monitored --output json
 ```
@@ -163,7 +163,7 @@ The basic CLI and status command use Python's standard library. The interactive 
 
 ```sh
 python -m pip install -r requirements-monitor.txt
-strata monitor --url http://127.0.0.1:8095
+strata monitor --url http://127.0.0.1:8000
 ```
 
 Use the same Python environment that runs Strata. Strata's runtime dependencies are listed separately in `requirements.txt`; the monitor dependency is not needed for `serve` or `status`.
@@ -185,7 +185,7 @@ python dist/strata-monitor.pyz monitor --url https://HOST --once --json
 python dist/strata-monitor.pyz logs --url https://HOST --output json
 ```
 
-The `.pyz` contains only the bounded telemetry client, connection store, renderers for the Overview and five detail pages, optional TUI module, the same status/monitor/logs command implementation used by `strata`, and Strata's MIT license notice. It has no server, engine, model, setup code or bundled framework. One-shot status, request activity and saved connections work with Python's standard library alone; interactive mode needs an explicit `python -m pip install textual==8.2.8` in that Python environment. The adjacent version-6 `.manifest.json` records a SHA-256 checksum, exact bundle members, Python 3.10 minimum and telemetry schema 1 compatibility. The verifier still accepts older version-1 through version-5 source bundles so a local update can retain and roll back to one. The manifest has no publisher signature, so it is a source-run artifact, not a signed release component. A remote URL still requires HTTPS or a local SSH tunnel; credentials come from an environment variable through `--credential-env` or a saved reference.
+The `.pyz` contains only the bounded telemetry client, connection store, renderers for the Overview and five detail pages, optional TUI module, the model-switcher modal the monitor opens with `m`, the same status/monitor/logs command implementation used by `strata`, and Strata's MIT license notice. It has no server, engine, model, setup code, launch screens or bundled framework. One-shot status, request activity and saved connections work with Python's standard library alone; interactive mode needs an explicit `python -m pip install textual==8.2.8` in that Python environment. The adjacent version-7 `.manifest.json` records a SHA-256 checksum, exact bundle members, Python 3.10 minimum and telemetry schema 1 compatibility. The verifier still accepts older version-1 through version-6 source bundles so a local update can retain and roll back to one. The manifest has no publisher signature, so it is a source-run artifact, not a signed release component. A remote URL still requires HTTPS or a local SSH tunnel; credentials come from an environment variable through `--credential-env` or a saved reference.
 
 Before distributing a candidate to an operator, run its standard-library smoke on each target Python and OS:
 

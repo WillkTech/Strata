@@ -744,7 +744,7 @@ def _effective(cfg: dict, saved: dict | None, cli: argparse.Namespace | None = N
     overrides = saved["overrides"] if saved else {}
     values = {}
     origins = {}
-    for key, default in (("host", "127.0.0.1"), ("port", 8095), ("parallel", None),
+    for key, default in (("host", "127.0.0.1"), ("port", 8000), ("parallel", None),
                          ("batch_groups", None), ("max_queue", None), ("queue_timeout", None),
                          ("offline", False), ("batch_telemetry", False)):
         explicit = getattr(cli, key, None) if cli is not None else None

@@ -27,7 +27,7 @@ TUNE_MODES = ("quick", "thorough", "skip")
 VISION_MODES = ("off", "on", "gpu", "cpu")
 MTP_MODES = ("on", "off")
 KV_MODES = ("int8", "q4_0", "k8v4", "fp16")
-DEFAULT_PORT = 8080
+DEFAULT_PORT = 8000
 
 #: How many requests the card can answer at once (the spec's "fit to card" default): by graphics memory.
 PARALLEL_BY_VRAM = ((32.0, 4), (24.0, 3), (20.0, 2), (0.0, 1))
@@ -121,6 +121,8 @@ class LaunchSettings:
             clean["extra"] = {str(k): str(v) for k, v in clean["extra"].items()}
         else:
             clean.pop("extra", None)
+        if str(clean.get("port") or "").strip() == "":
+            clean.pop("port", None)     # an empty saved port is the default again, never a file that cannot start
         return cls(**clean)
 
     def copy(self, **changes: Any) -> "LaunchSettings":
@@ -148,16 +150,28 @@ def closest(word: str, options: list[str]) -> str | None:
     return next(o for o in options if o.lower() == hit[0])
 
 
+def port_number(value: Any, default: int = DEFAULT_PORT) -> int:
+    """A usable TCP port from a config, preset or override; the default when the value is empty or wrong.
+
+    A saved `"port": ""` must not become `--port ""`: the server would stop before it listens.
+    """
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return default
+    return port if 1 <= port <= 65535 else default
+
+
 def check_port(port: Any) -> Notice | None:
     try:
         p = int(port)
     except (TypeError, ValueError):
-        return Notice("error", f"'{port}' is not a port number.", "Use a number from 1 to 65535, for example 8080.")
+        return Notice("error", f"'{port}' is not a port number.", "Use a number from 1 to 65535, for example 8000.")
     if not 1 <= p <= 65535:
-        return Notice("error", f"Port {p} does not exist.", "Use a number from 1 to 65535, for example 8080.")
+        return Notice("error", f"Port {p} does not exist.", "Use a number from 1 to 65535, for example 8000.")
     if p < 1024:
         return Notice("warn", f"Port {p} is below 1024; on many computers only an administrator can use it.",
-                      "8080 works without special rights.")
+                      "8000 works without special rights.")
     return None
 
 

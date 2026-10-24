@@ -18,7 +18,7 @@ examples:
   strata launch                                    open the guided screens (saved presets, then set up from the beginning)
   strata launch --preset "IQ3_XXS 128K"            start a saved preset (opens the monitor)
   strata launch --model iq3_xxs --context 128k --parallel 4 --vision off --tune quick \\
-                --access lan --port 8080 --save-preset "Office" --no-tui
+                --access lan --port 8000 --save-preset "Office" --no-tui
                                                    set everything on the command line, serve, print the address
   strata launch --model-path /data/models/IQ3_XXS --no-tui
                                                    use model files you already have (a folder or one .gguf)
@@ -56,9 +56,9 @@ def _port(value: str) -> int:
     try:
         p = int(value)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"'{value}' is not a port number. Use a number from 1 to 65535, for example 8080.") from None
+        raise argparse.ArgumentTypeError(f"'{value}' is not a port number. Use a number from 1 to 65535, for example 8000.") from None
     if not 1 <= p <= 65535:
-        raise argparse.ArgumentTypeError(f"port {p} does not exist. Use a number from 1 to 65535, for example 8080.")
+        raise argparse.ArgumentTypeError(f"port {p} does not exist. Use a number from 1 to 65535, for example 8000.")
     return p
 
 
@@ -142,7 +142,7 @@ def add_parsers(sp: argparse._SubParsersAction) -> list[argparse.ArgumentParser]
         description="Shows the settings file and environment an app needs to talk to the Strata server that `strata launch` started. "
                     "Without a name it lists the apps. With --write it writes the file after asking, keeping a backup of any file it replaces.")
     c.add_argument("harness", nargs="?", help="opencode, codex, claude-code, omp, pi, hermes, openclaw, deepseek-harness")
-    c.add_argument("--url", metavar="URL", help="the server address (default: the running launch, else http://127.0.0.1:8080)")
+    c.add_argument("--url", metavar="URL", help="the server address (default: the running launch, else http://127.0.0.1:8000)")
     c.add_argument("--key", metavar="KEY", help="the API key (default: the running launch's)")
     c.add_argument("--key-env", metavar="NAME", help="read the key from this environment variable")
     c.add_argument("--model", metavar="NAME", help="the model name the server reports (default: the running launch's)")
@@ -512,7 +512,7 @@ def running_launches() -> list[dict]:
             ov = prof.get("overrides") or {}
         except Exception:                                      # noqa: BLE001
             ov = {}
-        port = ov.get("port", S.DEFAULT_PORT)
+        port = S.port_number(ov.get("port"))
         out.append({"name": p["id"][7:], "profile": p["id"], "state": st.get("state"), "port": port,
                     "url": f"http://127.0.0.1:{port}", "host": ov.get("host", "127.0.0.1"), "config": prof.get("source_config")})
     return out
@@ -547,7 +547,7 @@ def launch_info(name: str | None = None) -> dict | None:
     preset = store.load(name, missing_ok=True) if name else None
     if pick is None and preset is None:
         return None
-    port = (pick or {}).get("port") or (preset.port if preset else S.DEFAULT_PORT)
+    port = S.port_number((pick or {}).get("port") or (preset.port if preset else None))
     return {"url": (pick or {}).get("url") or f"http://127.0.0.1:{port}", "key": (cfg.get("api_key") if str(cfg.get("api_key") or "").strip().lower() != "none" else None) or (preset.api_key if preset else None),
             "model": cfg.get("model_name") or "strata", "context": _cfg_context(cfg), "running": bool(pick), "name": (pick or {}).get("name") or (preset.name if preset else None),
             "port": port, "access": preset.access if preset else None}

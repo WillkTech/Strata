@@ -190,7 +190,7 @@ def _validate_settings(settings: object) -> dict[str, str]:
 
 
 def _port_active(cfg: dict) -> bool:
-    port = cfg.get("port", 8095)
+    port = cfg.get("port", 8000)
     if type(port) is not int or not 1 <= port <= 65535:
         return False
     host = cfg.get("host") or "127.0.0.1"

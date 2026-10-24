@@ -651,11 +651,11 @@ class AccessStep(Base):
                 await press(pilot, *self.REACH[:7], "n")
                 t = text_of(app)
             self.assertIn("This computer only", t)
-            self.assertIn("http://127.0.0.1:8080", t)
-            self.assertIn("http://192.168.1.5:8080", t)
+            self.assertIn("http://127.0.0.1:8000", t)
+            self.assertIn("http://192.168.1.5:8000", t)
             self.assertIn("cloudflared is not installed", t)
             self.assertIn("Tailscale is not installed", t)
-            self.assertIn("Port      [ 8080 ]", t)
+            self.assertIn("Port      [ 8000 ]", t)
             self.assertIn("API key   [ off ]", t)
         self.run_app(case)
 
@@ -691,7 +691,7 @@ class AccessStep(Base):
         async def case(app, pilot, ctx):
             with mock.patch.object(access, "tailscale_status", return_value={"installed": True, "running": True, "ip": "100.64.0.1", "name": "pc.tail.ts.net"}):
                 await press(pilot, *self.reach(), "down", "down", "down")
-                self.assertIn("http://pc.tail.ts.net:8080", text_of(app))
+                self.assertIn("http://pc.tail.ts.net:8000", text_of(app))
         self.run_app(case)
 
     def test_port_change_and_bad_port(self):
@@ -765,7 +765,7 @@ class SaveAndRun(Base):
             self.assertIn("Qwen3.8-Flash-Next IQ3_S", t)
             self.assertIn("32K, memory int8", t)
             self.assertIn("quick (about 20 min)", t)
-            self.assertIn("This computer only, port 8080", t)
+            self.assertIn("This computer only, port 8000", t)
             await press(pilot, "enter")                               # Save as a preset and launch
             await pilot.pause(0.8)
             self.assertEqual([p.name for p in store.list_presets()], ["IQ3_S 32K"])

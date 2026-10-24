@@ -1,7 +1,7 @@
 # strata launch preview: the monitor's new Overview (view 1)
 # (text of the screen as drawn at the size named in tests/terminal/launch_previews.py)
 
- STRATA  Serving   http://127.0.0.1:8095   IQ3_S 128K                                   * Reading prompt · 97%   [LIVE]
+ STRATA  Serving   http://127.0.0.1:8000   IQ3_S 128K                                   * Reading prompt · 97%   [LIVE]
  [1 Overview]  2 Serving  3 Requests  4 Engine  5 Hardware  6 Logs  7 Connect
  --------------------------------------------------------------------------------------------------------------
  Model state  Idle  [Reading]  Generating  Queued  Error                           35,610 / 36,742 tokens · 97%

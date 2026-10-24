@@ -2,7 +2,7 @@
 
 This page is written for an AI coding assistant (Claude Code, Cursor, Codex, GitHub Copilot, ...) that a user asked to
 set up Strata on their PC. Strata runs the Qwen3.8-Flash-Next model locally on one NVIDIA or AMD graphics card plus
-system RAM (or on an Apple Silicon Mac), and serves an OpenAI- and Anthropic-compatible API on `http://127.0.0.1:8080`.
+system RAM (or on an Apple Silicon Mac), and serves an OpenAI- and Anthropic-compatible API on `http://127.0.0.1:8000`.
 The human-oriented version of everything below is [INSTALL.md](INSTALL.md).
 
 You use the **Terminal**: the `strata` command. Install it with one line, then `strata launch` downloads the engine
@@ -113,7 +113,7 @@ The flags (all of them, with examples: `strata launch --help`):
 | `--gpu LIST` | card numbers, e.g. `0` or `0,1` (several cards share the model) |
 | `--tune quick\|thorough\|skip` | find the fastest settings first (default here: `skip`) |
 | `--access local\|lan\|cloudflare\|tailscale` | who can connect; beyond `local` a key is made for you |
-| `--port N` | the server port (default 8080) |
+| `--port N` | the server port (default 8000) |
 | `--api-key KEY`, `--api-key-env NAME`, `--new-key` | the key clients must send |
 | `--no-api-key` | share without a key (a warning, not a refusal; recommended only on a network you trust) |
 | `--save-preset NAME` | keep these choices; `strata launch --preset NAME` starts them again |
@@ -160,29 +160,29 @@ No browser opens by itself. Add `--open` to `strata launch` if the user wants th
 The HTTP server answers once the model is loaded (30-90 s on later starts, a few minutes the first time). Poll:
 
 ```
-curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:8000/health
 ```
 
 It returns `{"status": "ok", "model": ..., "max_context": ..., "images": ..., "api_key": ..., "loaded": true, ...}`.
 Then:
 
 ```
-curl http://127.0.0.1:8080/v1/models
-curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" -d "{\"model\": \"strata\", \"messages\": [{\"role\": \"user\", \"content\": \"Say hello in five words.\"}], \"max_tokens\": 64, \"reasoning_effort\": \"none\"}"
+curl http://127.0.0.1:8000/v1/models
+curl http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" -d "{\"model\": \"strata\", \"messages\": [{\"role\": \"user\", \"content\": \"Say hello in five words.\"}], \"max_tokens\": 64, \"reasoning_effort\": \"none\"}"
 ```
 
 With an API key, add `-H "Authorization: Bearer <key>"`.
 
 ## 8. Connect the user's apps
 
-- **Browser:** `http://127.0.0.1:8080` - Chat, a live Monitor, and About (settings and addresses).
-- **Any OpenAI-compatible app or agent:** base URL `http://127.0.0.1:8080/v1`, any API key (or the configured one),
+- **Browser:** `http://127.0.0.1:8000` - Chat, a live Monitor, and About (settings and addresses).
+- **Any OpenAI-compatible app or agent:** base URL `http://127.0.0.1:8000/v1`, any API key (or the configured one),
   any model name.
-- **Anthropic-compatible apps:** base URL `http://127.0.0.1:8080`, without `/v1`. Those apps add `/v1/messages`
+- **Anthropic-compatible apps:** base URL `http://127.0.0.1:8000`, without `/v1`. Those apps add `/v1/messages`
   themselves.
-- **Codex CLI and other Responses API apps:** `http://127.0.0.1:8080/v1/responses` (stateless; Codex's
+- **Codex CLI and other Responses API apps:** `http://127.0.0.1:8000/v1/responses` (stateless; Codex's
   `config.toml`: [DETAILS.md](DETAILS.md#the-responses-api-and-codex-cli)).
-- **Claude Code:** `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`, `ANTHROPIC_MODEL` set to a Claude model name it knows
+- **Claude Code:** `ANTHROPIC_BASE_URL=http://127.0.0.1:8000`, `ANTHROPIC_MODEL` set to a Claude model name it knows
   (Strata ignores the name), and any `ANTHROPIC_AUTH_TOKEN` (or the configured key).
 - **The easy way for a coding app:** `strata connect` lists them (OpenCode, Codex CLI, Claude Code, oh-my-pi, pi,
   Hermes Agent, OpenClaw). `strata connect <app>` prints the file and environment for the running server,
@@ -231,7 +231,7 @@ The flags (all of them: `START-HERE.bat --help`):
 | `--gpu N` / `--gpus 0,1` / `--gpus all` | one card, or several sharing the model (default: the card with the most VRAM) |
 | `--backend cuda\|hip` | NVIDIA or AMD engine; chosen by itself on a PC with only one kind of card |
 | `--data-dir PATH` | where new model files go. Nothing is moved unless you add `--move-data`; the saved default folder changes only with `--move-data` or `--set-default-data-dir` |
-| `--port N` | the server port (default 8080) |
+| `--port N` | the server port (default 8000) |
 | `--host H --api-key K` | listen beyond this PC; only together with a key |
 | `--no-start` | install only, do not start the server |
 | `--setup` | install another model or change settings of an installed one |
@@ -270,7 +270,7 @@ Notes:
 | `the NVIDIA driver is too old` | The user updates the driver (NVIDIA App or nvidia.com/drivers) and restarts; run the command again. |
 | Download or install stopped | Run the same command again; it continues. |
 | `Strata couldn't find an engine for this computer` | The card is not one the engine packages cover, or the update feed was not reachable. Check the card against the list in step 1, check the internet, run `strata doctor`, then `strata update`. |
-| `port 8080 is already in use` | Strata is already running (check `/health` and `strata launch --status`), or use `--port 8081`. |
+| `port 8000 is already in use` | Strata is already running (check `/health` and `strata launch --status`), or use `--port 8081`. |
 | Very slow, disk busy, or "the engine stopped unexpectedly" | Not enough free RAM: close programs, or choose a smaller size (`q2_0` or `iq2_xs`). |
 | `ExpertCache: cudaMalloc(...) failed: out of memory` with free VRAM (Windows) | The page file is off or tiny: set a fixed size (Custom size, the same initial and maximum size, e.g. 65536 MB) and restart; a page file Windows grows on demand ("System managed") may not grow in time (#60). |
 | `prompt ... exceeds the context` | Start again with a bigger `--context`. |

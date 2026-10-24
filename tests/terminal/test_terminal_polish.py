@@ -50,7 +50,7 @@ class MonitorFindsLaunch(unittest.TestCase):
 
     def test_nothing_running_keeps_the_default_address(self):
         endpoint = self._run(["monitor", "--once", "--quiet"], None)
-        self.assertEqual(endpoint.call_args[0][0], "http://127.0.0.1:8095")
+        self.assertEqual(endpoint.call_args[0][0], "http://127.0.0.1:8000")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@
    Pictures  off
    Parallel  fit to your card (1)
    Tuning    quick (about 20 min)
-   Access    My local network, port 8080, API key on
+   Access    My local network, port 8000, API key on
    Storage   Strata's data folder
 
  ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐

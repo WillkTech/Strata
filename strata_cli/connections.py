@@ -41,7 +41,7 @@ from strata_cli.client import server_url, url_prefix
 NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
 MAX_BYTES = 4096
-DEFAULT_URL = "http://127.0.0.1:8095"
+DEFAULT_URL = "http://127.0.0.1:8000"
 
 
 class ConnectionError(ValueError):

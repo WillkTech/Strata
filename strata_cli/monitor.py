@@ -350,7 +350,7 @@ class MonitorApp(App):
                     return p
             except Exception:
                 pass
-        return 8080
+        return 8000
 
     def _endpoint_host(self) -> str:
         try:
@@ -373,6 +373,48 @@ class MonitorApp(App):
         self.switcher_offered = True
         self.call_after_refresh(self.action_switch_model)
 
+    # ---- the port the monitor watches, and the one it may change
+
+    def _preset_name(self) -> str | None:
+        """The launch preset this monitor belongs to, when `strata launch` opened it."""
+        info = getattr(self, "info", None)
+        return info.get("name") if isinstance(info, dict) else None
+
+    def _can_write_port(self) -> bool:
+        """Only a local monitor with its own preset may write. `--url` and `--connection` change nothing on disk."""
+        return self._endpoint_is_local() and bool(self._preset_name())
+
+    def _live_count(self) -> int:
+        return len(((self.latest or {}).get("work") or {}).get("requests") or [])
+
+    def _set_endpoint_port(self, port: int) -> None:
+        """Endpoint is frozen, so a new port is a new endpoint. The credential stays until a restart makes a new one."""
+        parts = urllib.parse.urlsplit(getattr(self.endpoint, "root", ""))
+        root = urllib.parse.urlunsplit(parts._replace(netloc=f"{parts.hostname}:{port}"))
+        self.endpoint = Endpoint(root, self.endpoint.credential, self.endpoint.timeout, self.endpoint.prefix)
+
+    def _active_config(self) -> dict | None:
+        """The config the running server was started from, when the monitor can name it."""
+        model = ((self.latest or {}).get("model") or {}).get("id")
+        if not model:
+            return None
+        return next((m for m in switcher.discover_models() if m["id"] == model), None)
+
+    def _adopt_launch_info(self) -> None:
+        """A restart makes its own key, so the monitor re-reads it instead of keeping the old one."""
+        try:
+            from strata_cli.launch.cmd import launch_info
+            info = launch_info()
+        except Exception:                                       # noqa: BLE001 - no launch code in the thin bundle
+            return
+        if not info or not info.get("url"):
+            return
+        root = urllib.parse.urlsplit(info["url"])
+        self.endpoint = Endpoint(urllib.parse.urlunsplit((root.scheme, root.netloc, "", "", "")),
+                                 info.get("key") or None, self.endpoint.timeout, self.endpoint.prefix)
+        if isinstance(getattr(self, "info", None), dict):
+            self.info.update({k: v for k, v in info.items() if k in ("url", "key", "model", "port")})
+
     def action_switch_model(self) -> None:
         if self.closing or self.switching:      # a launch is already under way; do not stack dialogs or start it twice
             return
@@ -392,8 +434,14 @@ class MonitorApp(App):
                 chosen = next((m for m in models if m["id"] == model_id), None)
                 if chosen:
                     asyncio.create_task(self._perform_switch_model(chosen, port))
+            elif choice.startswith("port:"):
+                _, _, rest = choice.partition(":")
+                new_port, _, confirmed = rest.partition(":")
+                asyncio.create_task(self._perform_port_change(int(new_port), confirmed == "yes"))
 
-        self.push_screen(switcher.ModelSwitchScreen(status, models), on_chosen)
+        self.push_screen(switcher.ModelSwitchScreen(
+            status, models, self.connection_state, frozen=self.frozen, can_write=self._can_write_port(),
+            preset_name=self._preset_name(), live=self._live_count()), on_chosen)
 
     async def _perform_stop_server(self, port: int) -> None:
         self.selection_notice = f"Stopping server on port {port}..."
@@ -409,7 +457,7 @@ class MonitorApp(App):
     async def _perform_switch_model(self, model: dict, target_port: int) -> None:
         # The monitor is the authority on where the server listens: launching on the config's own
         # port would leave the monitor watching a port nothing answers on.
-        port = target_port
+        port = switcher.usable_port(target_port) or switcher.DEFAULT_PORT
         label = model.get("label", model["id"])
         self.switching = True
         self.error = None                         # a leftover "connection refused" must not sit under "starting ..."
@@ -445,6 +493,86 @@ class MonitorApp(App):
         self.switching = False
         if ready:
             self.selection_notice = f"Switched to {model.get('model_name', label)} (ready on port {port})"
+            self.error = None
+            self.failures = 0
+            self._schedule_poll(force=True)
+        else:
+            self.error = f"Server started but not answering on port {port}; check logs"
+            self.selection_notice = None
+            self._paint()
+
+    async def _perform_port_change(self, port: int, confirmed: bool) -> None:
+        """Point this monitor at `port`, or, when confirmed, move the server it owns there too.
+
+        Only a launch-base monitor may write: `can_write` covers the preset on disk, and the
+        dialog offers the `:yes` form only then. A monitor started with `--url` or `--connection`
+        changes nothing on disk or on the machine; it just watches the typed port.
+        """
+        old = self._current_port()
+        if port == old:
+            return
+        if not confirmed or not self._can_write_port():
+            self._set_endpoint_port(port)
+            self.error = None
+            self.switching = False
+            self.selection_notice = (f"Watching port {port}. The server on port {old} was not moved."
+                                     if old else f"Watching port {port}.")
+            self._schedule_poll(force=True)
+            return
+
+        name = self._preset_name()
+        try:
+            from strata_cli.launch import store
+            preset = store.load(name)
+            preset.port = port
+            store.save(preset, name)
+        except Exception as e:                                # noqa: BLE001 - a preset that cannot be saved must not stop a server
+            self.error = f"Could not save preset '{name}': {e}"
+            self.switching = False
+            self._paint()
+            return
+
+        model = self._active_config()
+        self.switching = True
+        self.error = None
+        self.selection_notice = f"Stopping server on port {old}..."
+        self._paint()
+        await asyncio.to_thread(switcher.stop_server_on_port, old)
+        self._set_endpoint_port(port)
+
+        if model is None:                                # the preset moved; there is no running config to restart
+            self.switching = False
+            self.selection_notice = (f"Preset '{name}' now uses port {port}. Nothing was running, so nothing "
+                                     "was restarted; press m to choose a model.")
+            self._schedule_poll(force=True)
+            return
+
+        label = model.get("label", model["id"])
+        self.selection_notice = f"Starting {label} on port {port}..."
+        self.connection_state = "connecting"
+        self._paint()
+        try:
+            await asyncio.to_thread(switcher.launch_model, model, port)
+        except Exception as e:
+            self.switching = False
+            self.error = f"Failed to launch model: {e}"
+            self.selection_notice = None
+            self._paint()
+            return
+
+        # This restart is ours, from the config, so the config's key is the one the server takes;
+        # a key the launch made for a different config must not be carried over.
+        key = switcher.config_api_key(model)
+        self.endpoint = Endpoint(self.endpoint.root, key or None, self.endpoint.timeout, self.endpoint.prefix)
+        if isinstance(getattr(self, "info", None), dict):
+            self.info.update({"key": key or None, "port": port, "url": self.endpoint.root})
+
+        self.selection_notice = f"Waiting for server to be ready on port {port}..."
+        self._paint()
+        ready = await switcher.wait_for_server_ready(port, timeout=600.0, key=self.endpoint.credential)
+        self.switching = False
+        if ready:
+            self.selection_notice = f"Moved {model.get('model_name', label)} to port {port}"
             self.error = None
             self.failures = 0
             self._schedule_poll(force=True)

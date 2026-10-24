@@ -9,13 +9,13 @@ These commands use the `strata` command that the one-line Terminal install puts 
 With Strata already serving locally, get one machine-readable snapshot:
 
 ```sh
-strata status --url http://127.0.0.1:8080 --json
+strata status --url http://127.0.0.1:8000 --json
 ```
 
 The interactive monitor comes with the installed Terminal. Open the one-screen Overview:
 
 ```sh
-strata monitor --url http://127.0.0.1:8080
+strata monitor --url http://127.0.0.1:8000
 ```
 
 The Overview puts serving state, prompt and answer speed, batch/queue pressure, four selected GPU rows, requests and activity on one screen. Press `1`–`6` for detail (`1`–`7` in the monitor that `strata launch` opens, where `7` is the Connect view), `Space` to freeze the display, `r` to refresh, and `q` to detach. Detach leaves the server running. On a machine without a terminal, use `status --json` or `monitor --once --json`.

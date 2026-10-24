@@ -1585,7 +1585,7 @@ class HeadlessMonitorTests(unittest.TestCase):
                     self.assertTrue(app.detail)
                     if (width, height) == (40, 12):
                         self.assertIn("More: strata status --json", content)
-                        self.assertIn("q keeps server on", str(app.query_one("#message").render()))
+                        self.assertIn("q detach", str(app.query_one("#message").render()))
                     elif (width, height) == (110, 30):
                         self.assertNotIn("More: strata status --json", content)
                 await pilot.press("q")

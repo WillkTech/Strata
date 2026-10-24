@@ -59,7 +59,7 @@ In the classic Windows console (the Windows 10 default window) the monitor first
 ```sh
 strata launch --preset "IQ3_XXS 128K"                                 # a saved preset (opens the monitor)
 strata launch --model iq3_xxs --context 128k --parallel 4 --vision off --tune quick \
-              --access lan --port 8080 --save-preset "Office" --no-tui   # serve and print the address
+              --access lan --port 8000 --save-preset "Office" --no-tui   # serve and print the address
 strata launch --model-path /data/models/IQ3_XXS --no-tui               # files you already have
 strata launch --preset Office --set prefill=65536 --set STRATA_PIN_BY_NEED=1 --no-tui
 strata launch --model q2_0 --pool-cores 2-14:2 --no-tui               # experimental: pin the CPU workers to these logical processors (see DETAILS.md)

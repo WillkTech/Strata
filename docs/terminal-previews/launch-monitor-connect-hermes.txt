@@ -1,11 +1,11 @@
 # strata launch preview: the Connect view, Hermes selected (its limits in plain words)
 # (text of the screen as drawn at the size named in tests/terminal/launch_previews.py)
 
- STRATA  Connect   http://127.0.0.1:8080                                                                         [LIVE]
+ STRATA  Connect   http://127.0.0.1:8000                                                                         [LIVE]
  1 Overview  2 Serving  3 Requests  4 Engine  5 Hardware  6 Logs  [7 Connect]
  ----------------------------------------------------------------------------------------------------
- Connect an app     URL http://127.0.0.1:8080/v1    model qwen3.8-flash-next-iq3_xxs    key sk-strata-****  (k show)
-      also reachable at http://192.168.88.21:8080/v1
+ Connect an app     URL http://127.0.0.1:8000/v1    model qwen3.8-flash-next-iq3_xxs    key sk-strata-****  (k show)
+      also reachable at http://192.168.88.21:8000/v1
 
     App                 Works with            Status
      OpenCode            chat + tools          tested ok
@@ -21,7 +21,7 @@
    model:
      default: qwen3.8-flash-next-iq3_xxs
      provider: lmstudio
-     base_url: http://127.0.0.1:8080/v1
+     base_url: http://127.0.0.1:8000/v1
      context_length: 32768
    compression:
      enabled: true

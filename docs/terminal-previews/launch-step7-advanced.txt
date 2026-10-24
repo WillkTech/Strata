@@ -15,7 +15,7 @@
    + Add a setting by name…                                  for flags of newer engine versions
  Command that will run
    component:strata-engine --max-context 131072 --kv int8 --prefill auto --expert-cache auto --spec 4
-   Same as: strata launch --model iq3_xxs --context 128k --vision off --tune quick --access local --port 8080
+   Same as: strata launch --model iq3_xxs --context 128k --vision off --tune quick --access local --port 8000
 
 
 

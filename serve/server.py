@@ -1,7 +1,7 @@
 """serve/server.py - plan v0.3 P8: OpenAI and Anthropic endpoints over any engine that maps token ids to tokens.
 
-    python -m serve.server --engine mock --port 8095            (a scripted engine, for clients and tests)
-    python -m serve.server --engine strata --config strata.json --port 8080   (the real engine, resident)
+    python -m serve.server --engine mock --port 8000            (a scripted engine, for clients and tests)
+    python -m serve.server --engine strata --config strata.json --port 8000   (the real engine, resident)
 
 Endpoints: POST /v1/chat/completions (OpenAI, stream and non-stream), POST /v1/messages (Anthropic, stream and
 non-stream), GET /v1/models, GET /models, GET /props, GET /slots, GET /health, GET /mcp. One sequence at a time behind a FIFO (plan: one resident sequence).
@@ -7336,8 +7336,8 @@ def lan_addresses() -> list[str]:
 
 
 def host_name(value) -> str:
-    """The name in a Host header (or an origin's host[:port]): "Example.com:8080" -> "example.com",
-    "[::1]:8095" -> "::1"; "" when it is malformed."""
+    """The name in a Host header (or an origin's host[:port]): "Example.com:8000" -> "example.com",
+    "[::1]:8000" -> "::1"; "" when it is malformed."""
     v = (value or "").strip().lower()
     if v.startswith("["):
         name, sep, rest = v[1:].partition("]")
@@ -7501,7 +7501,7 @@ def origin_allowed(origin: str, host, names, origins=()) -> bool:
     return bool(name) and (name in LOOPBACK_NAMES or name.endswith(".localhost") or _name_in(name, names))
 
 
-def serve(svc: Service, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
+def serve(svc: Service, host="127.0.0.1", port=8000) -> ThreadingHTTPServer:
     svc.host_names = host_names_for(host, svc.allowed_hosts, svc.trusted_origins)
     svc.start_telemetry()
     httpd = Server((host, port), make_handler(svc))
@@ -7936,7 +7936,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     ap.add_argument("--script", action="append",
                     help="the mock engine's answer (default: a short greeting); given more than once, requests get "
                          "them in turn and the last one repeats")
-    ap.add_argument("--port", type=int, default=8095)
+    ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--ready-file", help="write a JSON instance record once the API is bound and model state is known")
     ap.add_argument("--owner-fd", type=int, help=argparse.SUPPRESS)
     ap.add_argument("--shutdown-timeout", type=float, default=None,
