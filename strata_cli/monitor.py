@@ -143,6 +143,9 @@ class MonitorApp(App):
         from strata_cli import consoleinfo
         self.classic = consoleinfo.classic_style() if consoleinfo.legacy_console() else None
         self.margin = 3 if self.classic else 2        # one more column of room in the classic Windows console (its scroll bar)
+        self.switcher_offered = False                 # the "no server" switcher opens once on its own; `m` always reopens it
+        self.switching = False                        # a model we started is loading: polls stay CONNECTING
+        self.offer_switcher_on_disconnect = True      # plain `strata monitor`; a `strata launch` monitor is still loading
         self.history = MonitorHistory()
         self.activity_continuity = ActivityContinuity()
         self.displayed_activity_continuity = self.activity_continuity.status()
@@ -287,11 +290,14 @@ class MonitorApp(App):
             self.rate_previous = None
             if not self.frozen:
                 self.history.gap()
-            self.error = str(e)
             self.failures += 1
-            self.connection_state = ("auth_required" if e.exit_code == 4 else
-                                     "incompatible" if e.exit_code == 5 else
-                                     "stale" if self.has_snapshot and self.failures < 3 else "disconnected")
+            if self.switching:
+                self.connection_state = "connecting"
+            else:
+                self.error = str(e)
+                self.connection_state = ("auth_required" if e.exit_code == 4 else
+                                         "incompatible" if e.exit_code == 5 else
+                                         "stale" if self.has_snapshot and self.failures < 3 else "disconnected")
             self.next_poll_at = (float("inf") if e.exit_code in (4, 5) else
                                  time.monotonic() + min(30.0, 2.0 ** min(self.failures, 5) *
                                                         random.uniform(0.8, 1.2)))
@@ -299,15 +305,19 @@ class MonitorApp(App):
             self.rate_previous = None
             if not self.frozen:
                 self.history.gap()
-            self.error = "Telemetry collection failed"
             self.failures += 1
-            self.connection_state = "stale" if self.has_snapshot and self.failures < 3 else "disconnected"
+            if self.switching:
+                self.connection_state = "connecting"
+            else:
+                self.error = "Telemetry collection failed"
+                self.connection_state = "stale" if self.has_snapshot and self.failures < 3 else "disconnected"
             self.next_poll_at = (time.monotonic() + min(30.0, 2.0 ** min(self.failures, 5) *
                                                         random.uniform(0.8, 1.2)))
         finally:
             self.polling = False
             if not self.closing and self.is_mounted:
                 self._paint()
+                self._maybe_offer_switcher()
 
     async def _poll_metrics(self) -> None:
         """The browser Monitor's own data (/metrics: live state, engine facts, hardware with a minute of history, last requests)."""
@@ -342,12 +352,35 @@ class MonitorApp(App):
                 pass
         return 8080
 
+    def _endpoint_host(self) -> str:
+        try:
+            return urllib.parse.urlsplit(getattr(self.endpoint, "root", "")).hostname or "127.0.0.1"
+        except Exception:
+            return "127.0.0.1"
+
+    def _endpoint_is_local(self) -> bool:
+        return self._endpoint_host() in ("localhost", "127.0.0.1", "::1")
+
+    def _should_offer_switcher(self) -> bool:
+        """The switcher opens on its own once when a local monitor has nothing to watch."""
+        return (not self.switcher_offered and not self.closing and self.offer_switcher_on_disconnect
+                and not self.has_snapshot and self.connection_state == "disconnected"
+                and self._endpoint_is_local())
+
+    def _maybe_offer_switcher(self) -> None:
+        if not self._should_offer_switcher():
+            return
+        self.switcher_offered = True
+        self.call_after_refresh(self.action_switch_model)
+
     def action_switch_model(self) -> None:
-        if self.closing:
+        if self.closing or self.switching:      # a launch is already under way; do not stack dialogs or start it twice
+            return
+        if isinstance(self.screen, switcher.ModelSwitchScreen):
             return
         port = self._current_port()
         models = switcher.discover_models()
-        status = switcher.get_active_server_status(port)
+        status = switcher.get_active_server_status(port, key=self.endpoint.credential)
 
         def on_chosen(choice: str | None) -> None:
             if not choice or choice == "cancel":
@@ -374,8 +407,12 @@ class MonitorApp(App):
         self._schedule_poll(force=True)
 
     async def _perform_switch_model(self, model: dict, target_port: int) -> None:
-        port = model.get("port") or target_port
+        # The monitor is the authority on where the server listens: launching on the config's own
+        # port would leave the monitor watching a port nothing answers on.
+        port = target_port
         label = model.get("label", model["id"])
+        self.switching = True
+        self.error = None                         # a leftover "connection refused" must not sit under "starting ..."
         self.selection_notice = f"Stopping active server on port {port}..."
         self._paint()
         await asyncio.to_thread(switcher.stop_server_on_port, port)
@@ -387,15 +424,25 @@ class MonitorApp(App):
         try:
             await asyncio.to_thread(switcher.launch_model, model, port)
         except Exception as e:
+            self.switching = False
             self.error = f"Failed to launch model: {e}"
             self.selection_notice = None
             self._paint()
             return
 
+        # A config may require its own API key; the monitor started this server, so it adopts
+        # that key and can keep reading telemetry from it.
+        key = switcher.config_api_key(model)
+        if key:
+            self.endpoint = Endpoint(self.endpoint.root, key, self.endpoint.timeout, self.endpoint.prefix)
+            if isinstance(getattr(self, "info", None), dict):
+                self.info["key"] = key
+
         self.selection_notice = f"Waiting for server to be ready on port {port}..."
         self._paint()
 
-        ready = await switcher.wait_for_server_ready(port, timeout=120.0)
+        ready = await switcher.wait_for_server_ready(port, timeout=600.0, key=self.endpoint.credential)
+        self.switching = False
         if ready:
             self.selection_notice = f"Switched to {model.get('model_name', label)} (ready on port {port})"
             self.error = None

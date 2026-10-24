@@ -1,8 +1,11 @@
-"""Model switcher engine for Strata terminal and monitor.
+"""Model switcher engine and modal dialog for the Strata terminal monitor.
 
-References `/Volumes/vl/ai/Strata/switch.sh` to enable switching between models,
-discovering configurations, stopping active servers, and launching new model instances
-directly from Python and the TUI monitor.
+This is the Python replacement for an early `switch.sh`: it discovers configurations, reports
+the active server, stops it, and launches new model instances. The monitor calls these, and
+`ModelSwitchScreen` is the dialog it opens with the `m` key.
+
+Paths are derived from this file's location, so moving the repository (or the checkout that
+`strata-*.json` configs live in) does not leave the switcher looking at the old one.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from rich.text import Text
@@ -24,9 +28,13 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
+from strata_cli.launch.settings import check_port
 from strata_cli.launch.widgets import DARK, LIGHT, Item, Menu
+
+#: The checkout this module lives in (strata_cli/..), used for the default model search and the log folder.
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def get_server_pid(port: int) -> int | None:
@@ -195,7 +203,7 @@ def discover_models(search_dirs: list[str] | None = None) -> list[dict[str, Any]
     if search_dirs is None:
         search_dirs = [
             os.getcwd(),
-            "/Volumes/vl/ai/Strata",
+            str(REPO_ROOT),
         ]
 
     models: list[dict[str, Any]] = []
@@ -231,6 +239,21 @@ def discover_models(search_dirs: list[str] | None = None) -> list[dict[str, Any]
     return models
 
 
+def config_api_key(item: dict[str, Any]) -> str:
+    """The key a config's server accepts, for the monitor that launched it.
+
+    serve/server.py takes the key from --api-key, STRATA_API_KEY or the config's "api_key":
+    a string (several separated by commas), a list, or "none" for no key.
+    """
+    raw = (item.get("data") or {}).get("api_key", "")
+    if isinstance(raw, (list, tuple)):
+        raw = next((str(v) for v in raw if str(v).strip()), "")
+    raw = str(raw or "").strip()
+    if not raw or raw.lower() == "none":
+        return ""
+    return raw.split(",")[0].strip()
+
+
 def launch_model(item: dict[str, Any], port: int | None = None, python_exe: str | None = None) -> subprocess.Popen:
     """Launch a server model in the background, matching switch.sh start_server_background."""
     py = python_exe or sys.executable
@@ -240,7 +263,7 @@ def launch_model(item: dict[str, Any], port: int | None = None, python_exe: str 
         script = item["path"]
         arg = item.get("arg", "")
         cmd = ["/bin/sh", script, arg] if arg else ["/bin/sh", script]
-        log_dir = "/Volumes/vl/ai/Strata/logs"
+        log_dir = str(REPO_ROOT / "logs")
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, f"{item['id']}.log")
         log_file = open(log_path, "a", encoding="utf-8")
@@ -374,146 +397,3 @@ class ModelSwitchScreen(ModalScreen):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
-
-
-# ------------------------------------------------------------------------------------------------ CLI entrypoint
-
-def run_cli_menu() -> None:
-    """Standalone terminal menu for switching models, stopping, or attaching to monitor.
-    
-    Equivalent to switch.sh in interactive mode, but natively supporting v0.2.2 models.
-    """
-    models = discover_models()
-    port = 8080
-    if models and models[0].get("port"):
-        port = models[0]["port"]
-
-    target = sys.argv[1].lower().strip() if len(sys.argv) > 1 else ""
-
-    # Direct CLI arg execution, e.g.: llm stop, llm 1, llm swift, llm 64k
-    if target:
-        if target in ("stop", "kill"):
-            print(f"Stopping active Strata server on port {port}...")
-            stop_server_on_port(port)
-            print(f"Port {port} is free.")
-            return
-
-        if target in ("status", "ps"):
-            st = get_active_server_status(port)
-            print(f"[{st.get('badge')}] {st.get('detail')}")
-            return
-
-        if target in ("monitor", "top"):
-            from strata_cli.monitor_commands import main as monitor_main
-            sys.exit(monitor_main(["monitor", "--url", f"http://127.0.0.1:{port}"]))
-
-        # Check by index (1, 2, 3...)
-        if target.isdigit():
-            idx = int(target) - 1
-            if 0 <= idx < len(models):
-                _switch_and_monitor(models[idx], port)
-                return
-
-        # Check by substring (swift, qwen, 64k, 512k)
-        match = next((m for m in models if target in m["id"].lower() or target in m["label"].lower()), None)
-        if match:
-            _switch_and_monitor(match, port)
-            return
-
-        print(f"Unknown command or model: {target}")
-        print("Usage: llm [1-3 | swift | qwen | 64k | status | stop | monitor]")
-        sys.exit(1)
-
-    # Interactive CLI menu loop (like switch.sh)
-    while True:
-        os.system("clear")
-        st = get_active_server_status(port)
-        badge = st.get("badge", "STOPPED")
-        detail = st.get("detail", f"no Strata server on port {port}")
-
-        print("==================================================")
-        print(" Strata Model Switcher")
-        print("==================================================")
-        print("Currently active:")
-        print(f"\033[7m {badge} \033[27m")
-        print(detail)
-        print("")
-        print("Select a model to start:")
-        for i, m in enumerate(models, 1):
-            print(f"  {i}) {m['label']}")
-        print("  s) Stop active server")
-        print("  m) Live TUI monitor")
-        print("  q) Quit")
-        print("")
-
-        try:
-            choice = input(f"Choice [1-{len(models)}, s, m, q]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("")
-            break
-
-        if not choice or choice in ("q", "quit", "exit"):
-            break
-
-        if choice in ("s", "stop"):
-            print(f"\nStopping server on port {port}...")
-            stop_server_on_port(port)
-            print(f"Port {port} is free.")
-            time.sleep(1)
-            continue
-
-        if choice in ("m", "monitor"):
-            from strata_cli.monitor_commands import main as monitor_main
-            try:
-                monitor_main(["monitor", "--url", f"http://127.0.0.1:{port}"])
-            except Exception:
-                pass
-            continue
-
-        if choice.isdigit():
-            idx = int(choice) - 1
-            if 0 <= idx < len(models):
-                _switch_and_monitor(models[idx], port)
-                break
-
-        # Check keyword
-        match = next((m for m in models if choice in m["id"].lower() or choice in m["label"].lower()), None)
-        if match:
-            _switch_and_monitor(match, port)
-            break
-
-
-def _switch_and_monitor(model: dict[str, Any], port: int) -> None:
-    label = model.get("label", model["id"])
-    target_port = model.get("port") or port
-
-    print(f"\nStopping any active server on port {target_port}...")
-    stop_server_on_port(target_port)
-
-    print(f"Starting {label} on port {target_port}...")
-    launch_model(model, target_port)
-
-    print("Waiting for server to be ready", end="", flush=True)
-    start = time.time()
-    ready = False
-    while time.time() - start < 120.0:
-        if query_metrics(target_port, timeout=1.5) is not None:
-            ready = True
-            break
-        print(".", end="", flush=True)
-        time.sleep(1.5)
-
-    if ready:
-        print(" — ready!")
-        time.sleep(0.5)
-        print("Opening monitor (press 'm' anytime to switch models, 'q' to detach)...")
-        time.sleep(1)
-        from strata_cli.monitor_commands import main as monitor_main
-        sys.exit(monitor_main(["monitor", "--url", f"http://127.0.0.1:{target_port}"]))
-    else:
-        print(f"\nServer failed to become ready within 120s. Check logs.")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    run_cli_menu()

@@ -1,6 +1,6 @@
 #!/bin/sh
-# llm — Strata Model Switcher & Runner
-# Resolves Strata repository and runs the model switcher using the dedicated virtual environment.
+# llm — alias for the Strata monitor (the in-monitor Model Switcher dialog)
+# Resolves Strata repository and opens the monitor using the dedicated virtual environment.
 
 set -eu
 
@@ -31,4 +31,4 @@ fi
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 cd "$ROOT"
 
-exec "$PY" -m strata_cli.switcher "$@"
+exec "$PY" "$ROOT/strata.py" monitor "$@"

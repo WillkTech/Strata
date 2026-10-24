@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import unittest
+from unittest import mock
 from strata_cli import switcher
 from strata_cli.client import Endpoint
 from strata_cli.monitor import MonitorApp
@@ -64,6 +66,91 @@ class TestSwitcher(unittest.TestCase):
         keys = [b.key for b in app.BINDINGS]
         self.assertIn("m", keys)
         self.assertIn("s", keys)
+
+
+class TestMonitorSwitcher(unittest.TestCase):
+    def test_config_api_key_shapes(self):
+        self.assertEqual(switcher.config_api_key({"data": {"api_key": "k1,k2"}}), "k1")
+        self.assertEqual(switcher.config_api_key({"data": {"api_key": ["a", "b"]}}), "a")
+        self.assertEqual(switcher.config_api_key({"data": {"api_key": "none"}}), "")
+        self.assertEqual(switcher.config_api_key({"data": {}}), "")
+
+    def test_switch_launches_on_monitor_port_and_adopts_key(self):
+        """A config's own port/key must not leave the monitor watching 8095 while the model serves 8000."""
+        app = MonitorApp(Endpoint("http://127.0.0.1:8095"), None)
+        app._paint = lambda *a, **k: None
+        app._schedule_poll = lambda *a, **k: None
+        calls = {}
+
+        def fake_stop(port):
+            calls["stop"] = port
+            return True
+
+        def fake_launch(model, port):
+            calls["launch"] = (model["id"], port)
+
+        async def fake_ready(port, host="127.0.0.1", timeout=120.0, key=None):
+            calls["ready"] = (port, host, key)
+            return True
+
+        model = {"id": "m1", "label": "Model 1", "port": 8000,
+                 "model_name": "Model 1", "data": {"api_key": "secret"}}
+        with mock.patch.object(switcher, "stop_server_on_port", fake_stop), \
+                mock.patch.object(switcher, "launch_model", fake_launch), \
+                mock.patch.object(switcher, "wait_for_server_ready", fake_ready):
+            asyncio.run(app._perform_switch_model(model, 8095))
+
+        self.assertEqual(calls["stop"], 8095)
+        self.assertEqual(calls["launch"], ("m1", 8095))       # the monitor's port, not the config's 8000
+        self.assertEqual(calls["ready"][0], 8095)
+        self.assertEqual(calls["ready"][2], "secret")         # readiness polls carry the server's key
+        self.assertEqual(app.endpoint.credential, "secret")   # telemetry will not 401
+        self.assertFalse(app.switching)
+
+    def test_switcher_offers_once_when_no_connection(self):
+        app = MonitorApp(Endpoint("http://127.0.0.1:8095"), None)
+        app.has_snapshot = False
+        app.connection_state = "disconnected"
+        self.assertTrue(app._should_offer_switcher())
+        app.switcher_offered = True
+        self.assertFalse(app._should_offer_switcher())
+        app.switcher_offered = False
+        app.connection_state = "connected"
+        self.assertFalse(app._should_offer_switcher())
+        app.connection_state = "disconnected"
+        app.offer_switcher_on_disconnect = False
+        self.assertFalse(app._should_offer_switcher())
+
+    def test_remote_endpoint_does_not_offer_switcher(self):
+        app = MonitorApp(Endpoint("https://example.com"), None)
+        app.has_snapshot = False
+        app.connection_state = "disconnected"
+        self.assertFalse(app._should_offer_switcher())
+
+    def test_second_m_does_not_stack_a_second_dialog(self):
+        async def exercise():
+            app = MonitorApp(Endpoint("http://127.0.0.1:59999"), None, interval=0.5)
+            async with app.run_test(size=(100, 30)) as pilot:
+                for _ in range(40):
+                    if app.switcher_offered:
+                        break
+                    await pilot.pause(0.25)
+                await pilot.press("m")
+                await pilot.pause()
+                return sum(isinstance(s, switcher.ModelSwitchScreen) for s in app.screen_stack)
+        self.assertEqual(asyncio.run(exercise()), 1)
+
+    def test_switch_is_ignored_while_a_launch_is_running(self):
+        async def exercise():
+            app = MonitorApp(Endpoint("http://127.0.0.1:59999"), None, interval=30)
+            app.offer_switcher_on_disconnect = False   # nothing may open on its own in this test
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.switching = True
+                await pilot.press("m")
+                await pilot.pause()
+                return sum(isinstance(s, switcher.ModelSwitchScreen) for s in app.screen_stack)
+        self.assertEqual(asyncio.run(exercise()), 0)
 
 
 if __name__ == "__main__":

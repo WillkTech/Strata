@@ -122,3 +122,18 @@ target_link_libraries(strata_metal_kernels PUBLIC strata_metal_host mtl_rt)
 
 add_executable(strata ${S}/program/generate.cpp)
 target_link_libraries(strata PRIVATE strata_metal_kernels strata_metal_host strata_metal_kernels)
+
+# At run time the engine reads ggml-common.h, the .metal sources it compiles and the expert-profile /
+# draft-vocabulary tables (src/resource_path.h). A build used from its own tree finds them through the paths
+# compiled in above; those stop resolving the moment the tree is moved or renamed, and the engine then stops with
+# "mtl: cannot read <old path>". Staging the same files beside the executable - the <exe dir>/metal/ layout a
+# component package has - keeps build-metal/ runnable from anywhere.
+set(STRATA_METAL_STAGE "${CMAKE_CURRENT_BINARY_DIR}/metal")
+add_custom_command(TARGET strata POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${STRATA_METAL_STAGE}/data" "${STRATA_METAL_STAGE}/engine-msl"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${GGML_COMMON}" "${STRATA_METAL_STAGE}/ggml-common.h"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/kernels" "${STRATA_METAL_STAGE}/kernels"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/src/engine/msl" "${STRATA_METAL_STAGE}/engine-msl"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${STRATA_ROOT}/data/expert-profile.bin"
+          "${STRATA_ROOT}/data/draft_vocab.bin" "${STRATA_METAL_STAGE}/data"
+  COMMENT "strata metal: staging the run-time resources beside the executable")

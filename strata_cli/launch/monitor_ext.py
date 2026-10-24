@@ -41,6 +41,7 @@ class LaunchMonitor(MonitorApp):
         super().__init__(endpoint, snapshot, **kw)
         self.info = info
         self.ask_quit = ask_quit                  # False: plain `strata monitor` (q detaches, nothing to stop)
+        self.offer_switcher_on_disconnect = not ask_quit   # a launch is still loading; a plain monitor has nothing yet
         self.connect_enabled = True
         self.connect_index = 0
         self.show_key = False
