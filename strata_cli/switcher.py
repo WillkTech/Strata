@@ -74,6 +74,30 @@ def get_server_pid(port: int) -> int | None:
         return None
 
 
+def get_server_config_path(pid: int) -> str | None:
+    """Find the --config path of a running server process from its command line."""
+    args = None
+    try:
+        from strata_control import procs
+        args = procs.command_line(pid)
+    except Exception:
+        pass
+    if not args:
+        try:
+            out = subprocess.check_output(
+                ["ps", "-o", "command=", "-p", str(pid)],
+                text=True, stderr=subprocess.DEVNULL
+            ).strip()
+            args = out.split()
+        except Exception:
+            args = None
+    if args and "--config" in args:
+        idx = args.index("--config")
+        if idx + 1 < len(args):
+            return args[idx + 1]
+    return None
+
+
 def stop_server_on_port(port: int, timeout: float = 15.0) -> bool:
     """Gracefully terminate any Strata server listening on `port`, force-killing if needed.
     
@@ -224,6 +248,13 @@ def discover_models(search_dirs: list[str] | None = None) -> list[dict[str, Any]
             os.getcwd(),
             str(REPO_ROOT),
         ]
+        try:
+            from strata_control import paths
+            launch_d = str(paths.state_base() / "launch")
+            if os.path.isdir(launch_d) and launch_d not in search_dirs:
+                search_dirs.append(launch_d)
+        except Exception:
+            pass
 
     models: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
@@ -231,29 +262,34 @@ def discover_models(search_dirs: list[str] | None = None) -> list[dict[str, Any]
     for d in search_dirs:
         if not os.path.isdir(d):
             continue
-        pattern = os.path.join(d, "strata-*.json")
-        for path in sorted(glob.glob(pattern)):
-            canon = os.path.realpath(path)
-            # Skip old 0.2.1 configs if present to ensure only current v0.2.2 models appear
-            base = os.path.basename(canon)
-            if canon in seen_paths or base in ("strata-iq3_s-512k.json", "strata-iq3_s.json"):
-                continue
-            seen_paths.add(canon)
-            try:
-                with open(canon, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                config_id, label = _describe_config(canon, data)
-                models.append({
-                    "id": config_id,
-                    "label": label,
-                    "type": "config",
-                    "path": canon,
-                    "data": data,
-                    "model_name": data.get("model_name", config_id),
-                    "port": usable_port(data.get("port")) or DEFAULT_PORT,
-                })
-            except Exception:
-                continue
+        patterns = [os.path.join(d, "strata-*.json")]
+        if os.path.basename(d) == "launch":
+            patterns.append(os.path.join(d, "*.json"))
+        for pattern in patterns:
+            for path in sorted(glob.glob(pattern)):
+                canon = os.path.realpath(path)
+                # Skip old 0.2.1 configs if present to ensure only current v0.2.2 models appear
+                base = os.path.basename(canon)
+                if canon in seen_paths or base in ("strata-iq3_s-512k.json", "strata-iq3_s.json"):
+                    continue
+                seen_paths.add(canon)
+                try:
+                    with open(canon, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if not isinstance(data, dict) or ("exe" not in data and "engine" not in data and "model_name" not in data):
+                        continue
+                    config_id, label = _describe_config(canon, data)
+                    models.append({
+                        "id": config_id,
+                        "label": label,
+                        "type": "config",
+                        "path": canon,
+                        "data": data,
+                        "model_name": data.get("model_name", config_id),
+                        "port": usable_port(data.get("port")) or DEFAULT_PORT,
+                    })
+                except Exception:
+                    continue
 
     return models
 

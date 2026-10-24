@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import random
@@ -378,7 +379,17 @@ class MonitorApp(App):
     def _preset_name(self) -> str | None:
         """The launch preset this monitor belongs to, when `strata launch` opened it."""
         info = getattr(self, "info", None)
-        return info.get("name") if isinstance(info, dict) else None
+        name = info.get("name") if isinstance(info, dict) else None
+        if not name and isinstance(info, dict) and not info.get("url_only"):
+            try:
+                from strata_cli.launch.cmd import launch_info
+                li = launch_info()
+                if li and li.get("name"):
+                    name = li["name"]
+                    info["name"] = name
+            except Exception:
+                pass
+        return name
 
     def _can_write_port(self) -> bool:
         """Only a local monitor with its own preset may write. `--url` and `--connection` change nothing on disk."""
@@ -395,10 +406,56 @@ class MonitorApp(App):
 
     def _active_config(self) -> dict | None:
         """The config the running server was started from, when the monitor can name it."""
-        model = ((self.latest or {}).get("model") or {}).get("id")
-        if not model:
+        models = switcher.discover_models()
+        if not models:
             return None
-        return next((m for m in switcher.discover_models() if m["id"] == model), None)
+
+        model_id = ((self.latest or {}).get("model") or {}).get("id")
+        if not model_id and isinstance(getattr(self, "info", None), dict):
+            model_id = self.info.get("model")
+        if not model_id:
+            try:
+                st = switcher.get_active_server_status(self._current_port(), key=self.endpoint.credential)
+                model_id = st.get("model")
+            except Exception:
+                pass
+
+        if model_id:
+            for m in models:
+                if (m.get("id") == model_id or
+                    m.get("model_name") == model_id or
+                    (m.get("data") or {}).get("model_name") == model_id or
+                    m.get("label") == model_id):
+                    return m
+
+        # Check by running server process command line
+        try:
+            pid = switcher.get_server_pid(self._current_port())
+            if pid:
+                cfg_path = switcher.get_server_config_path(pid)
+                if cfg_path:
+                    for m in models:
+                        if os.path.realpath(m["path"]) == os.path.realpath(cfg_path):
+                            return m
+        except Exception:
+            pass
+
+        # Check by port
+        port = self._current_port()
+        for m in models:
+            if m.get("port") == port:
+                return m
+
+        name = self._preset_name()
+        if name:
+            for m in models:
+                if name.lower() in m.get("id", "").lower() or name.lower() in m.get("label", "").lower():
+                    return m
+
+        if len(models) == 1:
+            return models[0]
+
+        return None
 
     def _adopt_launch_info(self) -> None:
         """A restart makes its own key, so the monitor re-reads it instead of keeping the old one."""
@@ -413,7 +470,7 @@ class MonitorApp(App):
         self.endpoint = Endpoint(urllib.parse.urlunsplit((root.scheme, root.netloc, "", "", "")),
                                  info.get("key") or None, self.endpoint.timeout, self.endpoint.prefix)
         if isinstance(getattr(self, "info", None), dict):
-            self.info.update({k: v for k, v in info.items() if k in ("url", "key", "model", "port")})
+            self.info.update({k: v for k, v in info.items() if k in ("url", "key", "model", "port", "name", "profile")})
 
     def action_switch_model(self) -> None:
         if self.closing or self.switching:      # a launch is already under way; do not stack dialogs or start it twice
@@ -521,28 +578,60 @@ class MonitorApp(App):
             return
 
         name = self._preset_name()
-        try:
-            from strata_cli.launch import store
-            preset = store.load(name)
-            preset.port = port
-            store.save(preset, name)
-        except Exception as e:                                # noqa: BLE001 - a preset that cannot be saved must not stop a server
-            self.error = f"Could not save preset '{name}': {e}"
-            self.switching = False
-            self._paint()
-            return
+        if name:
+            try:
+                from strata_cli.launch import store
+                preset = store.load(name)
+                preset.port = port
+                store.save(preset, name)
+            except Exception as e:                                # noqa: BLE001 - a preset that cannot be saved must not stop a server
+                self.error = f"Could not save preset '{name}': {e}"
+                self.switching = False
+                self._paint()
+                return
 
         model = self._active_config()
+        if model and model.get("path") and os.path.exists(model["path"]):
+            try:
+                with open(model["path"], "r", encoding="utf-8") as f:
+                    cfg_data = json.load(f)
+                cfg_data["port"] = port
+                with open(model["path"], "w", encoding="utf-8") as f:
+                    json.dump(cfg_data, f, indent=2)
+                model["port"] = port
+                if isinstance(model.get("data"), dict):
+                    model["data"]["port"] = port
+            except Exception:
+                pass
+
+        profile = (getattr(self, "info", None) or {}).get("profile")
+        if profile:
+            try:
+                from strata_control import profiles
+                cur, rev = profiles.load(profile)
+                ov = cur.get("overrides") or {}
+                ov["port"] = port
+                profiles.save(profile, {**cur, "overrides": ov}, expected_revision=rev)
+            except Exception:
+                pass
+
         self.switching = True
         self.error = None
         self.selection_notice = f"Stopping server on port {old}..."
         self._paint()
+        if profile:
+            try:
+                from strata_control import runtime
+                runtime.stop(profile, timeout=30)
+            except Exception:
+                pass
         await asyncio.to_thread(switcher.stop_server_on_port, old)
         self._set_endpoint_port(port)
 
         if model is None:                                # the preset moved; there is no running config to restart
             self.switching = False
-            self.selection_notice = (f"Preset '{name}' now uses port {port}. Nothing was running, so nothing "
+            msg = f"Preset '{name}' now uses port {port}." if name else f"Port setting updated to {port}."
+            self.selection_notice = (f"{msg} Nothing was running, so nothing "
                                      "was restarted; press m to choose a model.")
             self._schedule_poll(force=True)
             return
@@ -552,7 +641,16 @@ class MonitorApp(App):
         self.connection_state = "connecting"
         self._paint()
         try:
-            await asyncio.to_thread(switcher.launch_model, model, port)
+            started_via_runtime = False
+            if profile:
+                try:
+                    from strata_control import runtime
+                    runtime.start(profile, wait=300)
+                    started_via_runtime = True
+                except Exception:
+                    started_via_runtime = False
+            if not started_via_runtime:
+                await asyncio.to_thread(switcher.launch_model, model, port)
         except Exception as e:
             self.switching = False
             self.error = f"Failed to launch model: {e}"

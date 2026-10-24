@@ -401,7 +401,8 @@ class SetupArgs(unittest.TestCase):
         import tempfile
         own = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, own, True)
-        a = self.runner(data_dir="/d", model_path=own, gpus=[1])
+        with mock.patch.object(sys, "platform", "linux"):
+            a = self.runner(data_dir="/d", model_path=own, gpus=[1])
         self.assertEqual(a[:8], ["--yes", "--no-start", "--family", "qwen", "--model", "IQ3_XXS", "--context", "32768"])
         for pair in (["--vision", "no"], ["--kv", "q4_0"], ["--experimental-speed-projection", "off"], ["--data-dir", "/d"], ["--gguf-dir", own],
                      ["--gpu", "1"]):

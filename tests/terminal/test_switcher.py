@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import unittest
 from pathlib import Path
@@ -376,6 +377,44 @@ class TestMonitorPortChange(unittest.TestCase):
         self.assertNotIn("stop", self.calls)
         self.assertNotIn("save", self.calls)
         self.assertEqual(app.endpoint.root, "http://127.0.0.1:8080")
+
+    def test_active_model_matches_by_model_name(self):
+        # In real life, config id is strata-m5-64k.json, but telemetry reports the model_name
+        self.model = {"id": "strata-m5-64k.json", "label": "Swift Daily", "port": 8080,
+                      "model_name": "Swift-1.5-Qwen3.8-Flash-Next-Abliterated-IQ3_S-64K",
+                      "data": {"api_key": "secret", "model_name": "Swift-1.5-Qwen3.8-Flash-Next-Abliterated-IQ3_S-64K"}}
+        app = self._app({"name": "Demo"})
+        app.latest = {"model": {"id": "Swift-1.5-Qwen3.8-Flash-Next-Abliterated-IQ3_S-64K"}}
+        matched = app._active_config()
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched["id"], "strata-m5-64k.json")
+        asyncio.run(app._perform_port_change(18099, True))
+        self.assertEqual(self.calls.get("launch"), ("strata-m5-64k.json", 18099))
+        self.assertEqual(app.endpoint.root, "http://127.0.0.1:18099")
+
+    def test_port_change_updates_config_file_on_disk(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"model_name": "test-model", "port": 8000}, f)
+            cfg_path = f.name
+        self.addCleanup(lambda: os.unlink(cfg_path) if os.path.exists(cfg_path) else None)
+        self.model = {"id": "test.json", "label": "Test", "port": 8000, "path": cfg_path,
+                      "model_name": "test-model", "data": {"model_name": "test-model", "port": 8000}}
+        app = self._app({"name": "Demo"})
+        app.latest = {"model": {"id": "test-model"}}
+        asyncio.run(app._perform_port_change(18099, True))
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            updated = json.load(f)
+        self.assertEqual(updated["port"], 18099)
+
+    def test_empty_port_in_settings_coerced_to_default(self):
+        from strata_cli.launch.settings import LaunchSettings
+        s = LaunchSettings(port="")
+        self.assertEqual(s.port, 8000)
+        s2 = LaunchSettings.from_dict({"port": ""})
+        self.assertEqual(s2.port, 8000)
+        s3 = LaunchSettings.from_dict({"port": 0})
+        self.assertEqual(s3.port, 8000)
 
 
 if __name__ == "__main__":

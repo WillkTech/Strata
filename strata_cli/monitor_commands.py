@@ -224,8 +224,12 @@ def run(a: argparse.Namespace) -> int:
             return 0
         # the one monitor, with the same seven views as the one `strata launch` opens (Connect is key 7 and works against this --url
         # server); q just detaches here: nothing was started by this command, so there is nothing to stop
-        LaunchMonitor(endpoint, None, info={"url": endpoint.base_url, "urls": [endpoint.base_url], "key": endpoint.credential or "", "model": "",
-                                            "profile": None, "name": None}, ask_quit=False, interval=a.interval, requests=a.requests,
+        info_dict = {"url": endpoint.base_url, "urls": [endpoint.base_url], "key": endpoint.credential or "",
+                     "model": (found or {}).get("model", ""),
+                     "profile": (found or {}).get("profile"),
+                     "name": (found or {}).get("name"),
+                     "url_only": bool(a.url or a.connection)}
+        LaunchMonitor(endpoint, None, info=info_dict, ask_quit=False, interval=a.interval, requests=a.requests,
                       theme=a.theme, color=a.color, glyphs=a.glyphs).run()
         return 0
     except ClientError as e:

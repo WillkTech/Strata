@@ -101,6 +101,9 @@ class LaunchSettings:
     last_used: str | None = None
     created: str | None = None
 
+    def __post_init__(self) -> None:
+        self.port = port_number(self.port)
+
     @property
     def is_tuned(self) -> bool:
         """Tuning was done for this preset: it saved faster settings (tuned_preset), or it measured that the standard settings are already the

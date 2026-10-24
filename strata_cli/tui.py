@@ -108,6 +108,7 @@ class Menu(Static):
         self.index = 0
         self.top = 0
         self.window = window            # 0 = show all rows
+        self._custom_glyphs = glyphs is not None
         self.g = glyphs or Glyphs()
         self.show_header = bool(self.columns and any(t for t, _ in self.columns))
 
@@ -145,6 +146,13 @@ class Menu(Static):
         self._refresh()
 
     def _refresh(self) -> None:
+        if not self._custom_glyphs:
+            try:
+                scr = getattr(self, "screen", None)
+                if scr and getattr(scr, "g", None):
+                    self.g = scr.g
+            except Exception:
+                pass
         win = self.window or len(self.items)
         if self.index < self.top:
             self.top = self.index
